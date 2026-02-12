@@ -1,0 +1,16 @@
+# Foundry
+cache/
+out/
+broadcast/
+
+# Node
+node_modules/
+.env
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
