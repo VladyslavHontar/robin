@@ -80,6 +80,13 @@ contract LBRouter {
         address pair = factory.getPair(tokenIn, tokenOut, binStep);
         if (pair == address(0)) revert LBRouter__PairNotFound();
 
+        // Transfer tokens from user to router first
+        // (pair will then pull from router)
+        _safeTransferFrom(tokenIn, msg.sender, address(this), amountIn);
+
+        // Approve pair to spend router's tokens
+        _safeApprove(tokenIn, pair, amountIn);
+
         // Determine swap direction
         bool swapForY = tokenIn < tokenOut;
 
@@ -94,6 +101,9 @@ contract LBRouter {
 
         ILBPairTypes.SwapResult memory result = ILBPair(pair).swap(params);
         amountOut = result.amountOut;
+
+        // Reset approval
+        _safeApprove(tokenIn, pair, 0);
 
         if (amountOut < minAmountOut) {
             revert LBRouter__InsufficientAmountOut();
@@ -421,5 +431,43 @@ contract LBRouter {
         else {
             return 100;
         }
+    }
+
+    /**
+     * @notice Safe transferFrom for ERC20 tokens
+     * @param token Token address
+     * @param from Sender address
+     * @param to Recipient address
+     * @param amount Amount to transfer
+     */
+    function _safeTransferFrom(
+        address token,
+        address from,
+        address to,
+        uint256 amount
+    ) internal {
+        (bool success, bytes memory data) = token.call(
+            abi.encodeWithSignature("transferFrom(address,address,uint256)", from, to, amount)
+        );
+        require(
+            success && (data.length == 0 || abi.decode(data, (bool))),
+            "LBRouter: TRANSFER_FROM_FAILED"
+        );
+    }
+
+    /**
+     * @notice Safe approve for ERC20 tokens
+     * @param token Token address
+     * @param spender Spender address
+     * @param amount Amount to approve
+     */
+    function _safeApprove(address token, address spender, uint256 amount) internal {
+        (bool success, bytes memory data) = token.call(
+            abi.encodeWithSignature("approve(address,uint256)", spender, amount)
+        );
+        require(
+            success && (data.length == 0 || abi.decode(data, (bool))),
+            "LBRouter: APPROVE_FAILED"
+        );
     }
 }

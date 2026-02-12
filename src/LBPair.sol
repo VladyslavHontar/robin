@@ -327,6 +327,17 @@ contract LBPair is ILBPair {
             activeId = currentBinId;
         }
 
+        // Execute token transfers
+        if (params.swapForY) {
+            // Swapping X for Y: receive X, send Y
+            _transferFrom(tokenX, msg.sender, address(this), params.amountIn);
+            _transfer(tokenY, params.to, totalAmountOut);
+        } else {
+            // Swapping Y for X: receive Y, send X
+            _transferFrom(tokenY, msg.sender, address(this), params.amountIn);
+            _transfer(tokenX, params.to, totalAmountOut);
+        }
+
         // Prepare result
         result = SwapResult({
             amountOut: totalAmountOut,
@@ -393,6 +404,14 @@ contract LBPair is ILBPair {
             totalAmountY += amountY;
         }
 
+        // Transfer tokens from user to pair
+        if (totalAmountX > 0) {
+            _transferFrom(tokenX, msg.sender, address(this), totalAmountX);
+        }
+        if (totalAmountY > 0) {
+            _transferFrom(tokenY, msg.sender, address(this), totalAmountY);
+        }
+
         emit LiquidityAdded(
             msg.sender,
             params.to,
@@ -441,6 +460,14 @@ contract LBPair is ILBPair {
         // Validate slippage
         if (amountX < params.minAmountX || amountY < params.minAmountY) {
             revert LBPair__SlippageExceeded(amountX < amountY ? amountX : amountY, 0);
+        }
+
+        // Transfer tokens to user
+        if (amountX > 0) {
+            _transfer(tokenX, params.to, amountX);
+        }
+        if (amountY > 0) {
+            _transfer(tokenY, params.to, amountY);
         }
 
         emit LiquidityRemoved(
@@ -592,13 +619,24 @@ contract LBPair is ILBPair {
         LiquidityData storage liquidity = _liquidityData[bin.liquidityIndex];
 
         if (liquidity.totalShares == 0) {
-            // First liquidity: shares = sqrt(amountX * amountY)
-            shares = _sqrt(amountX * amountY);
+            // First liquidity
+            if (amountX > 0 && amountY > 0) {
+                // Both tokens: shares = sqrt(amountX * amountY)
+                shares = _sqrt(amountX * amountY);
+            } else {
+                // Single-sided: shares = amount of token being deposited
+                shares = amountX > 0 ? amountX : amountY;
+            }
         } else {
             // Proportional to existing liquidity
-            uint256 shareX = (amountX * liquidity.totalShares) / uint256(bin.reserveX);
-            uint256 shareY = (amountY * liquidity.totalShares) / uint256(bin.reserveY);
-            shares = shareX < shareY ? shareX : shareY;
+            if (bin.reserveX > 0 && amountX > 0) {
+                uint256 shareX = (amountX * liquidity.totalShares) / uint256(bin.reserveX);
+                shares = shareX;
+            }
+            if (bin.reserveY > 0 && amountY > 0) {
+                uint256 shareY = (amountY * liquidity.totalShares) / uint256(bin.reserveY);
+                shares = shares == 0 ? shareY : (shares < shareY ? shares : shareY);
+            }
         }
 
         // Update bin reserves
@@ -693,5 +731,40 @@ contract LBPair is ILBPair {
             y = z;
             z = (x / z + z) / 2;
         }
+    }
+
+    /**
+     * @notice Safe token transfer
+     * @param token Token address
+     * @param to Recipient
+     * @param amount Amount to transfer
+     */
+    function _transfer(address token, address to, uint256 amount) internal {
+        if (amount == 0) return;
+        (bool success, bytes memory data) = token.call(
+            abi.encodeWithSignature("transfer(address,uint256)", to, amount)
+        );
+        require(
+            success && (data.length == 0 || abi.decode(data, (bool))),
+            "LBPair: TRANSFER_FAILED"
+        );
+    }
+
+    /**
+     * @notice Safe token transferFrom
+     * @param token Token address
+     * @param from Sender
+     * @param to Recipient
+     * @param amount Amount to transfer
+     */
+    function _transferFrom(address token, address from, address to, uint256 amount) internal {
+        if (amount == 0) return;
+        (bool success, bytes memory data) = token.call(
+            abi.encodeWithSignature("transferFrom(address,address,uint256)", from, to, amount)
+        );
+        require(
+            success && (data.length == 0 || abi.decode(data, (bool))),
+            "LBPair: TRANSFER_FROM_FAILED"
+        );
     }
 }
