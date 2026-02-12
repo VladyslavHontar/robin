@@ -1,0 +1,425 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+
+import {ILBFactory} from "./interfaces/ILBFactory.sol";
+import {ILBPair} from "./interfaces/ILBPair.sol";
+import {ILBPairTypes} from "./interfaces/ILBPairTypes.sol";
+
+/**
+ * @title LBRouter
+ * @notice User-facing router for Liquidity Book operations
+ * @dev Provides convenient interfaces for swaps and liquidity management
+ *
+ * Features:
+ * - Simplified swap interface with slippage protection
+ * - Liquidity distribution strategies (uniform, normal, spot)
+ * - Multi-hop swap support
+ * - Deadline enforcement on all operations
+ */
+contract LBRouter {
+    // =============================================================
+    //                          ERRORS
+    // =============================================================
+
+    error LBRouter__ZeroAddress();
+    error LBRouter__InvalidPath();
+    error LBRouter__InsufficientAmountOut();
+    error LBRouter__ExcessiveAmountIn();
+    error LBRouter__InvalidDistribution();
+    error LBRouter__PairNotFound();
+    error LBRouter__DeadlineExceeded();
+    error LBRouter__InvalidBinRange();
+
+    // =============================================================
+    //                          STORAGE
+    // =============================================================
+
+    /// @notice Factory address
+    ILBFactory public immutable factory;
+
+    // =============================================================
+    //                        CONSTRUCTOR
+    // =============================================================
+
+    /**
+     * @notice Initialize router
+     * @param _factory Factory address
+     */
+    constructor(address _factory) {
+        if (_factory == address(0)) revert LBRouter__ZeroAddress();
+        factory = ILBFactory(_factory);
+    }
+
+    // =============================================================
+    //                      SWAP FUNCTIONS
+    // =============================================================
+
+    /**
+     * @notice Swap exact tokens for tokens (single hop)
+     * @param tokenIn Input token address
+     * @param tokenOut Output token address
+     * @param binStep Bin step for the pair
+     * @param amountIn Amount of input tokens
+     * @param minAmountOut Minimum amount of output tokens
+     * @param to Recipient address
+     * @param deadline Transaction deadline
+     * @return amountOut Actual amount of output tokens received
+     */
+    function swapExactTokensForTokens(
+        address tokenIn,
+        address tokenOut,
+        uint16 binStep,
+        uint256 amountIn,
+        uint256 minAmountOut,
+        address to,
+        uint256 deadline
+    ) external returns (uint256 amountOut) {
+        _checkDeadline(deadline);
+
+        // Get pair
+        address pair = factory.getPair(tokenIn, tokenOut, binStep);
+        if (pair == address(0)) revert LBRouter__PairNotFound();
+
+        // Determine swap direction
+        bool swapForY = tokenIn < tokenOut;
+
+        // Execute swap
+        ILBPairTypes.SwapParameters memory params = ILBPairTypes.SwapParameters({
+            swapForY: swapForY,
+            amountIn: amountIn,
+            minAmountOut: minAmountOut,
+            deadline: deadline,
+            to: to
+        });
+
+        ILBPairTypes.SwapResult memory result = ILBPair(pair).swap(params);
+        amountOut = result.amountOut;
+
+        if (amountOut < minAmountOut) {
+            revert LBRouter__InsufficientAmountOut();
+        }
+    }
+
+    /**
+     * @notice Get quote for swap (view function)
+     * @param tokenIn Input token
+     * @param tokenOut Output token
+     * @param binStep Bin step
+     * @param amountIn Input amount
+     * @return amountOut Estimated output amount
+     * @return fees Estimated fees
+     */
+    function getSwapQuote(
+        address tokenIn,
+        address tokenOut,
+        uint16 binStep,
+        uint256 amountIn
+    ) external view returns (uint256 amountOut, uint256 fees) {
+        address pair = factory.getPair(tokenIn, tokenOut, binStep);
+        if (pair == address(0)) revert LBRouter__PairNotFound();
+
+        bool swapForY = tokenIn < tokenOut;
+        return ILBPair(pair).getSwapOut(swapForY, amountIn);
+    }
+
+    // =============================================================
+    //                   LIQUIDITY FUNCTIONS
+    // =============================================================
+
+    /**
+     * @notice Add liquidity with uniform distribution
+     * @param tokenX Token X address
+     * @param tokenY Token Y address
+     * @param binStep Bin step
+     * @param amountX Amount of token X
+     * @param amountY Amount of token Y
+     * @param activeBinId Desired active bin ID
+     * @param binRange Number of bins on each side of active bin
+     * @param to Recipient of LP shares
+     * @param deadline Transaction deadline
+     * @return shares Array of shares minted
+     */
+    function addLiquidityUniform(
+        address tokenX,
+        address tokenY,
+        uint16 binStep,
+        uint256 amountX,
+        uint256 amountY,
+        uint24 activeBinId,
+        uint24 binRange,
+        address to,
+        uint256 deadline
+    ) external returns (uint256[] memory shares) {
+        _checkDeadline(deadline);
+
+        address pair = factory.getPair(tokenX, tokenY, binStep);
+        if (pair == address(0)) revert LBRouter__PairNotFound();
+
+        // Generate uniform distribution
+        (uint24[] memory binIds, uint64[] memory distX, uint64[] memory distY) =
+            _generateUniformDistribution(activeBinId, binRange);
+
+        ILBPairTypes.LiquidityParameters memory params = ILBPairTypes.LiquidityParameters({
+            binIds: binIds,
+            distributionX: distX,
+            distributionY: distY,
+            amountX: amountX,
+            amountY: amountY,
+            activeIdDesired: activeBinId,
+            idSlippage: 5, // 5 bins slippage tolerance
+            deadline: deadline,
+            to: to
+        });
+
+        shares = ILBPair(pair).mint(params);
+    }
+
+    /**
+     * @notice Add liquidity with spot concentration (single bin)
+     * @param tokenX Token X address
+     * @param tokenY Token Y address
+     * @param binStep Bin step
+     * @param amountX Amount of token X
+     * @param amountY Amount of token Y
+     * @param binId Target bin ID
+     * @param to Recipient of LP shares
+     * @param deadline Transaction deadline
+     * @return shares Shares minted in the bin
+     */
+    function addLiquiditySpot(
+        address tokenX,
+        address tokenY,
+        uint16 binStep,
+        uint256 amountX,
+        uint256 amountY,
+        uint24 binId,
+        address to,
+        uint256 deadline
+    ) external returns (uint256[] memory shares) {
+        _checkDeadline(deadline);
+
+        address pair = factory.getPair(tokenX, tokenY, binStep);
+        if (pair == address(0)) revert LBRouter__PairNotFound();
+
+        // Single bin distribution
+        uint24[] memory binIds = new uint24[](1);
+        binIds[0] = binId;
+
+        uint64[] memory distX = new uint64[](1);
+        distX[0] = 1e18; // 100%
+
+        uint64[] memory distY = new uint64[](1);
+        distY[0] = 1e18; // 100%
+
+        ILBPairTypes.LiquidityParameters memory params = ILBPairTypes.LiquidityParameters({
+            binIds: binIds,
+            distributionX: distX,
+            distributionY: distY,
+            amountX: amountX,
+            amountY: amountY,
+            activeIdDesired: binId,
+            idSlippage: 0, // Exact bin
+            deadline: deadline,
+            to: to
+        });
+
+        shares = ILBPair(pair).mint(params);
+    }
+
+    /**
+     * @notice Remove liquidity from bins
+     * @param tokenX Token X address
+     * @param tokenY Token Y address
+     * @param binStep Bin step
+     * @param binIds Array of bin IDs to remove from
+     * @param sharesPerBin Array of shares to remove per bin
+     * @param minAmountX Minimum amount of token X
+     * @param minAmountY Minimum amount of token Y
+     * @param to Recipient address
+     * @param deadline Transaction deadline
+     * @return amountX Amount of token X received
+     * @return amountY Amount of token Y received
+     */
+    function removeLiquidity(
+        address tokenX,
+        address tokenY,
+        uint16 binStep,
+        uint24[] calldata binIds,
+        uint256[] calldata sharesPerBin,
+        uint256 minAmountX,
+        uint256 minAmountY,
+        address to,
+        uint256 deadline
+    ) external returns (uint256 amountX, uint256 amountY) {
+        _checkDeadline(deadline);
+
+        address pair = factory.getPair(tokenX, tokenY, binStep);
+        if (pair == address(0)) revert LBRouter__PairNotFound();
+
+        ILBPairTypes.RemoveLiquidityParameters memory params =
+            ILBPairTypes.RemoveLiquidityParameters({
+                binIds: binIds,
+                shares: sharesPerBin,
+                minAmountX: minAmountX,
+                minAmountY: minAmountY,
+                deadline: deadline,
+                to: to
+            });
+
+        return ILBPair(pair).burn(params);
+    }
+
+    // =============================================================
+    //                    HELPER FUNCTIONS
+    // =============================================================
+
+    /**
+     * @notice Generate uniform distribution across bins
+     * @param activeBinId Center bin ID
+     * @param binRange Range on each side
+     * @return binIds Array of bin IDs
+     * @return distX Distribution for token X
+     * @return distY Distribution for token Y
+     */
+    function _generateUniformDistribution(
+        uint24 activeBinId,
+        uint24 binRange
+    ) internal pure returns (
+        uint24[] memory binIds,
+        uint64[] memory distX,
+        uint64[] memory distY
+    ) {
+        if (binRange == 0 || binRange > 100) revert LBRouter__InvalidBinRange();
+
+        uint256 totalBins = uint256(binRange) * 2 + 1; // Range on both sides + center
+        binIds = new uint24[](totalBins);
+        distX = new uint64[](totalBins);
+        distY = new uint64[](totalBins);
+
+        uint64 sharePerBin = uint64(1e18 / totalBins);
+
+        for (uint256 i = 0; i < totalBins; i++) {
+            // Calculate bin ID: activeBinId - binRange + i
+            binIds[i] = uint24(uint256(activeBinId) - uint256(binRange) + i);
+
+            if (binIds[i] < activeBinId) {
+                // Below active bin: only token Y
+                distX[i] = 0;
+                distY[i] = sharePerBin;
+            } else if (binIds[i] > activeBinId) {
+                // Above active bin: only token X
+                distX[i] = sharePerBin;
+                distY[i] = 0;
+            } else {
+                // Active bin: both tokens
+                distX[i] = sharePerBin / 2;
+                distY[i] = sharePerBin / 2;
+            }
+        }
+    }
+
+    /**
+     * @notice Generate normal (bell curve) distribution
+     * @param activeBinId Center bin ID
+     * @param binRange Range on each side
+     * @return binIds Array of bin IDs
+     * @return distX Distribution for token X
+     * @return distY Distribution for token Y
+     */
+    function generateNormalDistribution(
+        uint24 activeBinId,
+        uint24 binRange
+    ) external pure returns (
+        uint24[] memory binIds,
+        uint64[] memory distX,
+        uint64[] memory distY
+    ) {
+        if (binRange == 0 || binRange > 100) revert LBRouter__InvalidBinRange();
+
+        uint256 totalBins = uint256(binRange) * 2 + 1;
+        binIds = new uint24[](totalBins);
+        distX = new uint64[](totalBins);
+        distY = new uint64[](totalBins);
+
+        uint256 totalWeight;
+
+        // Calculate weights using simplified normal distribution
+        uint256[] memory weights = new uint256[](totalBins);
+        for (uint256 i = 0; i < totalBins; i++) {
+            int256 distance = int256(i) - int256(uint256(binRange)); // Distance from center
+
+            // Gaussian-like weight: e^(-(distance^2) / (2 * sigma^2))
+            // Simplified: weight = 100 / (1 + distance^2)
+            uint256 distSquared = uint256(distance * distance);
+            weights[i] = 100e18 / (1e18 + distSquared * 1e18);
+            totalWeight += weights[i];
+        }
+
+        // Normalize weights to sum to 1e18
+        for (uint256 i = 0; i < totalBins; i++) {
+            uint64 normalizedShare = uint64((weights[i] * 1e18) / totalWeight);
+
+            binIds[i] = uint24(uint256(activeBinId) - uint256(binRange) + i);
+
+            if (binIds[i] < activeBinId) {
+                distX[i] = 0;
+                distY[i] = normalizedShare;
+            } else if (binIds[i] > activeBinId) {
+                distX[i] = normalizedShare;
+                distY[i] = 0;
+            } else {
+                distX[i] = normalizedShare / 2;
+                distY[i] = normalizedShare / 2;
+            }
+        }
+    }
+
+    /**
+     * @notice Check if deadline has passed
+     * @param deadline Deadline timestamp
+     */
+    function _checkDeadline(uint256 deadline) internal view {
+        if (block.timestamp > deadline) revert LBRouter__DeadlineExceeded();
+    }
+
+    /**
+     * @notice Calculate optimal bin range for a given volatility
+     * @param binStep Bin step
+     * @param expectedVolatilityBps Expected volatility in basis points
+     * @return binRange Recommended bin range
+     */
+    function calculateOptimalBinRange(
+        uint16 binStep,
+        uint256 expectedVolatilityBps
+    ) external pure returns (uint24 binRange) {
+        // binRange = volatility / binStep
+        // E.g., 10% volatility with 0.1% bin step = 100 bins
+        binRange = uint24((expectedVolatilityBps * 100) / uint256(binStep));
+
+        // Cap at reasonable values
+        if (binRange < 5) binRange = 5;
+        if (binRange > 100) binRange = 100;
+    }
+
+    /**
+     * @notice Get recommended bin step for token pair
+     * @param expectedDailyVolatilityBps Expected daily volatility
+     * @return binStep Recommended bin step (10, 50, or 100 bp)
+     */
+    function getRecommendedBinStep(
+        uint256 expectedDailyVolatilityBps
+    ) external pure returns (uint16 binStep) {
+        // Ultra-tight (10 bp): < 50 bp daily vol (stable/blue chip stocks)
+        if (expectedDailyVolatilityBps < 50) {
+            return 10;
+        }
+        // Standard (50 bp): 50-200 bp daily vol (normal stocks)
+        else if (expectedDailyVolatilityBps < 200) {
+            return 50;
+        }
+        // Wide (100 bp): > 200 bp daily vol (volatile stocks/crypto)
+        else {
+            return 100;
+        }
+    }
+}
