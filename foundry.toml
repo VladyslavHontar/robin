@@ -14,6 +14,14 @@ gas_reports = ["*"]
 [rpc_endpoints]
 robinhood_testnet = "https://rpc.testnet.chain.robinhood.com"
 
+# Chain configuration
+[chains]
+robinhood_testnet = { chain_id = 46630 }
+
+# Etherscan configuration for verification
+[etherscan]
+robinhood_testnet = { key = "${ETHERSCAN_API_KEY}", url = "https://explorer.testnet.chain.robinhood.com/api" }
+
 # Formatter
 [profile.default.fmt]
 line_length = 100
