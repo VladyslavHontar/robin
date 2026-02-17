@@ -11,6 +11,7 @@ import {ILBPairTypes} from "../interfaces/ILBPairTypes.sol";
  * Fee Structure:
  * - Base Fee: Constant fee (e.g., 0.3%)
  * - Volatility Fee: Dynamic fee that increases when price moves rapidly
+ * - Oracle Deviation Fee: Extra fee when DEX price diverges from oracle
  * - Time Adjustment: Lower fees during market hours, higher during off-hours
  */
 library FeeHelper {
@@ -63,6 +64,92 @@ library FeeHelper {
         if (totalFeeBps > MAX_TOTAL_FEE) {
             totalFeeBps = MAX_TOTAL_FEE;
         }
+    }
+
+    /**
+     * @notice Calculate total fee including oracle deviation
+     * @dev Total = baseFee + volatilityFee + oracleDeviationFee (+ timeAdjustment)
+     * @param feeParams Fee parameters
+     * @param activeBinId Current active bin
+     * @param targetBinId Target bin after swap
+     * @param oracleDeviationFeeBps Extra fee from oracle deviation (0 if no oracle)
+     * @return totalFeeBps Total fee in basis points
+     */
+    function getTotalFee(
+        ILBPairTypes.FeeParameters memory feeParams,
+        uint24 activeBinId,
+        uint24 targetBinId,
+        uint256 oracleDeviationFeeBps
+    ) internal view returns (uint256 totalFeeBps) {
+        // Start with base fee
+        totalFeeBps = feeParams.baseFee;
+
+        // Add volatility fee if price is moving
+        if (activeBinId != targetBinId) {
+            uint256 volatilityFee = getVolatilityFee(feeParams, activeBinId, targetBinId);
+            totalFeeBps += volatilityFee;
+        }
+
+        // Add oracle deviation fee
+        totalFeeBps += oracleDeviationFeeBps;
+
+        // Apply time-based adjustment (stock trading optimization)
+        totalFeeBps = applyTimeAdjustment(totalFeeBps);
+
+        // Cap at maximum
+        if (totalFeeBps > MAX_TOTAL_FEE) {
+            totalFeeBps = MAX_TOTAL_FEE;
+        }
+    }
+
+    /**
+     * @notice Calculate oracle deviation fee using piecewise linear formula
+     * @dev Fee increases with bin distance from oracle:
+     *      - Within deadzone: 0
+     *      - Tier 1: linear slope (gentle)
+     *      - Tier 2: linear slope (steep)
+     *      - Beyond tier 2: capped at maxDeviationFee
+     * @param activeBinId Current DEX active bin
+     * @param oracleBinId Oracle-derived bin ID
+     * @param params Deviation fee parameters
+     * @return feeBps Oracle deviation fee in basis points
+     */
+    function getOracleDeviationFee(
+        uint24 activeBinId,
+        uint24 oracleBinId,
+        ILBPairTypes.OracleDeviationParams memory params
+    ) internal pure returns (uint256 feeBps) {
+        // Calculate absolute bin distance
+        uint256 deviation = activeBinId > oracleBinId
+            ? uint256(activeBinId - oracleBinId)
+            : uint256(oracleBinId - activeBinId);
+
+        // Deadzone: no extra fee
+        if (deviation <= params.deadzoneBins) {
+            return 0;
+        }
+
+        // Tier 1: gentle slope
+        uint256 binsInTier1;
+        if (deviation <= params.tier1MaxBins) {
+            binsInTier1 = deviation - params.deadzoneBins;
+            feeBps = binsInTier1 * params.tier1RatePerBin;
+            return feeBps > params.maxDeviationFee ? params.maxDeviationFee : feeBps;
+        }
+
+        // Full tier 1 fee
+        binsInTier1 = uint256(params.tier1MaxBins) - uint256(params.deadzoneBins);
+        uint256 tier1Fee = binsInTier1 * params.tier1RatePerBin;
+
+        // Tier 2: steeper slope
+        if (deviation <= params.tier2MaxBins) {
+            uint256 binsInTier2 = deviation - params.tier1MaxBins;
+            feeBps = tier1Fee + binsInTier2 * params.tier2RatePerBin;
+            return feeBps > params.maxDeviationFee ? params.maxDeviationFee : feeBps;
+        }
+
+        // Beyond tier 2: capped
+        return params.maxDeviationFee;
     }
 
     /**

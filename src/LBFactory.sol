@@ -40,6 +40,9 @@ contract LBFactory is ILBFactory {
     /// @notice Compliance module address (optional)
     address public complianceModule;
 
+    /// @notice Oracle module address (optional)
+    address public oracleModule;
+
     /// @notice Constant bin steps (immutable after deployment)
     uint16 public constant BIN_STEP_ULTRA_TIGHT = 10; // 0.1%
     uint16 public constant BIN_STEP_STANDARD = 50; // 0.5%
@@ -173,6 +176,11 @@ contract LBFactory is ILBFactory {
             LBPair(pair).setCompliance(complianceModule);
         }
 
+        // Set oracle module if configured
+        if (oracleModule != address(0)) {
+            LBPair(pair).setOracle(oracleModule);
+        }
+
         // Store pair
         _pairs[token0][token1][binStep] = pair;
         allPairs.push(pair);
@@ -248,6 +256,27 @@ contract LBFactory is ILBFactory {
     ) external onlyOwner {
         if (pair == address(0)) revert LBFactory__ZeroAddress();
         LBPair(pair).setCompliance(_complianceModule);
+    }
+
+    /**
+     * @notice Set the oracle module for all new pairs
+     * @param _oracleModule OracleModule address (address(0) to disable)
+     */
+    function setOracleModule(address _oracleModule) external onlyOwner {
+        oracleModule = _oracleModule;
+    }
+
+    /**
+     * @notice Set oracle module on an existing pair
+     * @param pair Pair address
+     * @param _oracleModule OracleModule address (address(0) to disable)
+     */
+    function setPairOracle(
+        address pair,
+        address _oracleModule
+    ) external onlyOwner {
+        if (pair == address(0)) revert LBFactory__ZeroAddress();
+        LBPair(pair).setOracle(_oracleModule);
     }
 
     /**

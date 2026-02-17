@@ -133,4 +133,22 @@ interface ILBPairTypes {
         uint256 cumulativeVolatility;
         uint40 timestamp;
     }
+
+    /**
+     * @notice Parameters for oracle deviation fee calculation
+     * @param deadzoneBins No extra fee within this bin distance
+     * @param tier1MaxBins End of tier 1 (linear slope 1)
+     * @param tier1RatePerBin Fee per bin in tier 1 (basis points)
+     * @param tier2MaxBins End of tier 2 (steeper slope)
+     * @param tier2RatePerBin Fee per bin in tier 2 (basis points)
+     * @param maxDeviationFee Hard cap on oracle deviation fee (basis points)
+     */
+    struct OracleDeviationParams {
+        uint24 deadzoneBins;
+        uint24 tier1MaxBins;
+        uint16 tier1RatePerBin;
+        uint24 tier2MaxBins;
+        uint16 tier2RatePerBin;
+        uint16 maxDeviationFee;
+    }
 }

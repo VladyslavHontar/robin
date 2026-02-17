@@ -42,9 +42,9 @@ actor "Owner / Agent" as admin #FFCCBC
 '  LEVEL 1 — ENTRY
 ' =============================================================
 package "Level 1 — Entry (User-Facing)" #E3F2FD {
-    rectangle "LBFactory\n...\ncreatePair()\ngetPair()\nsetFeeParameters()\nsetComplianceModule()\ntransferOwnership()" as factory #BBDEFB
+    rectangle "LBFactory\n...\ncreatePair()\ngetPair()\nsetFeeParameters()\nsetComplianceModule()\nsetOracleModule()\nsetPairOracle()\ntransferOwnership()" as factory #BBDEFB
 
-    rectangle "LBRouter\n...\nswapExactTokensForTokens()\naddLiquidity()\nremoveLiquidity()\ngetSwapQuote()" as router #BBDEFB
+    rectangle "LBRouter\n...\nswapExactTokensForTokens()\naddLiquidity()\nremoveLiquidity()\ngetSwapQuote()\ngetActiveBinFromOracle()\ngetOracleDeviation()" as router #BBDEFB
 }
 
 ' =============================================================
@@ -53,7 +53,9 @@ package "Level 1 — Entry (User-Facing)" #E3F2FD {
 package "Level 2 — Core Engine" #E8F5E9 {
     rectangle "ComplianceModule\n...\ncanTransfer()\nisVerified()\nsetCountryAllowed()\nsetTransferLimits()" as compliance #FFF176
 
-    rectangle "LBPair  (1 per token pair)\n...\nswap()  /  mint()  /  burn()\ncollectFees()  /  balanceOf()\ngetBinReserves()  /  getSwapOut()" as pair #A5D6A7
+    rectangle "LBPair  (1 per token pair)\n...\nswap()  /  mint()  /  burn()\ncollectFees()  /  balanceOf()\ngetBinReserves()  /  getSwapOut()\nsetCompliance()  /  setOracle()" as pair #A5D6A7
+
+    rectangle "OracleModule\n...\ngetOracleBinId()\ngetDeviationFee()\ngetOraclePrice()\nsetPriceFeed()\nsetDeviationParams()" as oracle #FFCC80
 }
 
 ' =============================================================
@@ -74,24 +76,24 @@ package "Level 3 — Libraries (Stateless)" #F3E5F5 {
 
     rectangle "BitMath\n...\nclosestBitRight()\nsetBit() / clearBit()" as bitMath #E1BEE7
 
-    rectangle "FeeHelper\n...\ngetTotalFee()\napplyTimeAdjustment()" as feeHelper #E1BEE7
+    rectangle "FeeHelper\n...\ngetTotalFee()\ngetOracleDeviationFee()\napplyTimeAdjustment()" as feeHelper #E1BEE7
 }
 
 package "Level 3 — External (On-Chain)" #FFF8E1 {
     rectangle "ERC-20 Tokens\n...\ntokenX / tokenY\ntransferFrom()\ntransfer()" as tokens #FFE082
 
-    rectangle "Chainlink Oracle\n...\nlatestRoundData()\nstock price feeds" as chainlink #FFE082
+    rectangle "Chainlink Oracle\n...\nlatestRoundData()\ndecimals()\nstock price feeds" as chainlink #FFE082
 }
 
 ' =============================================================
 '  LEVEL 4 — FOUNDATION
 ' =============================================================
 package "Level 4 — Shared Types & Interfaces" #ECEFF1 {
-    rectangle "ILBPairTypes\n...\nBinState, FeeParameters,\nSwapParameters, SwapResult,\nLiquidityParameters" as types #CFD8DC
+    rectangle "ILBPairTypes\n...\nBinState, FeeParameters,\nOracleDeviationParams,\nSwapParameters, SwapResult,\nLiquidityParameters" as types #CFD8DC
 
-    rectangle "Interfaces\n...\nILBPair, ILBFactory,\nIComplianceModule,\nIIdentityRegistry, IIdentity" as ifaces #CFD8DC
+    rectangle "Interfaces\n...\nILBPair, ILBFactory,\nIOracleModule,\nIComplianceModule,\nIIdentityRegistry, IIdentity" as ifaces #CFD8DC
 
-    rectangle "ILBPairErrors / Events\n...\n24 custom errors\n9 events" as errEvt #CFD8DC
+    rectangle "ILBPairErrors / Events\n...\n25 custom errors\n9 events" as errEvt #CFD8DC
 }
 
 ' =============================================================
@@ -110,17 +112,22 @@ factory -right-> router : "  "
 ' =============================================================
 factory -down-> compliance : "configure"
 factory -down-> pair : "creates"
+factory -down-> oracle : "configure"
 router -down-> pair : "swap() / mint() / burn()"
+router -down-> oracle : "getOracleBinId()"
 
 ' =============================================================
 '  CONNECTIONS — Level 2 internal
 ' =============================================================
 pair -left-> compliance : "canTransfer()"
+pair -right-> oracle : "getDeviationFee()"
 
 ' =============================================================
 '  CONNECTIONS — Level 2 → Level 3
 ' =============================================================
 compliance -down-> registry : "isVerified()"
+oracle -down-> chainlink : "latestRoundData()"
+oracle -down-> binMath : "getIdFromPrice()"
 pair -down-> binMath
 pair -down-> swapHelper
 pair -down-> tokens : "transfer()"

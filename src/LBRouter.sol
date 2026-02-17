@@ -4,6 +4,7 @@ pragma solidity ^0.8.28;
 import {ILBFactory} from "./interfaces/ILBFactory.sol";
 import {ILBPair} from "./interfaces/ILBPair.sol";
 import {ILBPairTypes} from "./interfaces/ILBPairTypes.sol";
+import {IOracleModule} from "./interfaces/IOracleModule.sol";
 
 /**
  * @title LBRouter
@@ -29,6 +30,7 @@ contract LBRouter {
     error LBRouter__PairNotFound();
     error LBRouter__DeadlineExceeded();
     error LBRouter__InvalidBinRange();
+    error LBRouter__OracleNotSet();
 
     // =============================================================
     //                          STORAGE
@@ -277,6 +279,68 @@ contract LBRouter {
             });
 
         return ILBPair(pair).burn(params);
+    }
+
+    // =============================================================
+    //                   ORACLE VIEW FUNCTIONS
+    // =============================================================
+
+    /**
+     * @notice Get the oracle-derived active bin for a pair (LP helper)
+     * @dev Converts Chainlink stock price to a bin ID so LPs know where to position
+     * @param tokenX Token X address
+     * @param tokenY Token Y address
+     * @param binStep Bin step
+     * @return oracleBinId The bin ID corresponding to the oracle price
+     * @return isValid True if oracle price is available and fresh
+     */
+    function getActiveBinFromOracle(
+        address tokenX,
+        address tokenY,
+        uint16 binStep
+    ) external view returns (uint24 oracleBinId, bool isValid) {
+        address pair = factory.getPair(tokenX, tokenY, binStep);
+        if (pair == address(0)) revert LBRouter__PairNotFound();
+
+        address oracleAddr = ILBPair(pair).oracle();
+        if (oracleAddr == address(0)) revert LBRouter__OracleNotSet();
+
+        return IOracleModule(oracleAddr).getOracleBinId(pair);
+    }
+
+    /**
+     * @notice Get oracle deviation info for a pair
+     * @dev Shows how far the DEX price is from the oracle and the resulting fee
+     * @param tokenX Token X address
+     * @param tokenY Token Y address
+     * @param binStep Bin step
+     * @return dexBinId Current DEX active bin
+     * @return oracleBinId Oracle-derived bin ID
+     * @return deviationBins Absolute bin distance
+     * @return extraFeeBps Extra fee due to deviation
+     */
+    function getOracleDeviation(
+        address tokenX,
+        address tokenY,
+        uint16 binStep
+    ) external view returns (uint24 dexBinId, uint24 oracleBinId, uint24 deviationBins, uint256 extraFeeBps) {
+        address pair = factory.getPair(tokenX, tokenY, binStep);
+        if (pair == address(0)) revert LBRouter__PairNotFound();
+
+        dexBinId = ILBPair(pair).activeId();
+
+        address oracleAddr = ILBPair(pair).oracle();
+        if (oracleAddr == address(0)) revert LBRouter__OracleNotSet();
+
+        bool isValid;
+        (oracleBinId, isValid) = IOracleModule(oracleAddr).getOracleBinId(pair);
+
+        if (isValid) {
+            deviationBins = dexBinId > oracleBinId
+                ? dexBinId - oracleBinId
+                : oracleBinId - dexBinId;
+            extraFeeBps = IOracleModule(oracleAddr).getDeviationFee(pair, dexBinId);
+        }
     }
 
     // =============================================================

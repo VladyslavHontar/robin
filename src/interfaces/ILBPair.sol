@@ -40,6 +40,18 @@ interface ILBPair is ILBPairTypes, ILBPairErrors, ILBPairEvents {
     function activeId() external view returns (uint24);
 
     /**
+     * @notice Get the compliance module address
+     * @return Compliance module address (address(0) if disabled)
+     */
+    function compliance() external view returns (address);
+
+    /**
+     * @notice Get the oracle module address
+     * @return Oracle module address (address(0) if disabled)
+     */
+    function oracle() external view returns (address);
+
+    /**
      * @notice Get reserves for a specific bin
      * @param binId The bin ID to query
      * @return reserveX Token X reserves

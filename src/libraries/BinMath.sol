@@ -83,19 +83,19 @@ library BinMath {
         require(binStep > 0 && binStep <= MAX_BIN_STEP, "BinMath: invalid bin step");
         require(price > 0, "BinMath: price must be positive");
 
-        // Calculate log base (1 + binStep/10000) of price
-        // binId = INITIAL_BIN_ID + log(price/SCALE) / log(1 + binStep/10000)
-
-        // Use binary search to find the bin ID
-        // This is more gas-efficient than logarithm calculation for small exponents
-
         if (price == SCALE) {
             return INITIAL_BIN_ID;
         }
 
+        // Bound the search to prevent overflow in _pow.
+        // Max representable exponent: (1 + binStep/10000)^n * SCALE < 2^256
+        // → n < 128 * ln(2) / ln(1 + binStep/10000) ≈ 800000 / binStep
+        uint24 maxDelta = uint24(800_000 / uint256(binStep));
+        if (maxDelta > INITIAL_BIN_ID) maxDelta = INITIAL_BIN_ID; // Prevent underflow
+
         bool searchUp = price > SCALE;
-        uint24 low = searchUp ? INITIAL_BIN_ID : 0;
-        uint24 high = searchUp ? type(uint24).max : INITIAL_BIN_ID;
+        uint24 low = searchUp ? INITIAL_BIN_ID : (INITIAL_BIN_ID > maxDelta ? INITIAL_BIN_ID - maxDelta : 0);
+        uint24 high = searchUp ? INITIAL_BIN_ID + maxDelta : INITIAL_BIN_ID;
 
         // Binary search for the correct bin
         while (low < high) {
@@ -168,6 +168,7 @@ library BinMath {
     /**
      * @notice Binary exponentiation for fixed-point numbers
      * @dev Calculates base^exp where base is scaled by 2^128
+     *      Uses 512-bit intermediate multiplication to avoid overflow
      * @param base The base value (scaled by 2^128)
      * @param exp The exponent (unscaled integer)
      * @return result base^exp (scaled by 2^128)
@@ -185,13 +186,66 @@ library BinMath {
         // Binary exponentiation
         while (exp > 0) {
             if (exp & 1 == 1) {
-                // If bit is set, multiply result by current base
-                result = (result * base) / SCALE;
+                result = _mulDivDown(result, base, SCALE);
             }
-            // Square the base for next bit
-            base = (base * base) / SCALE;
+            base = _mulDivDown(base, base, SCALE);
             exp >>= 1;
         }
+    }
+
+    /**
+     * @notice Full-precision multiply then divide: (x * y) / d without overflow
+     * @dev Uses 512-bit intermediate multiplication via assembly
+     * @param x First multiplicand
+     * @param y Second multiplicand
+     * @param d Divisor
+     * @return result (x * y) / d rounded down
+     */
+    function _mulDivDown(uint256 x, uint256 y, uint256 d) private pure returns (uint256 result) {
+        // 512-bit multiply [prod1 prod0] = x * y
+        uint256 prod0;
+        uint256 prod1;
+        assembly {
+            let mm := mulmod(x, y, not(0))
+            prod0 := mul(x, y)
+            prod1 := sub(sub(mm, prod0), lt(mm, prod0))
+        }
+
+        // No overflow — simple case
+        if (prod1 == 0) {
+            return prod0 / d;
+        }
+
+        // Overflow: need full 512-bit division
+        require(d > prod1, "BinMath: mulDiv overflow");
+
+        uint256 remainder;
+        assembly {
+            remainder := mulmod(x, y, d)
+        }
+        assembly {
+            prod1 := sub(prod1, gt(remainder, prod0))
+            prod0 := sub(prod0, remainder)
+        }
+
+        // Factor powers of two out of denominator
+        uint256 twos = d & (~d + 1);
+        assembly {
+            d := div(d, twos)
+            prod0 := div(prod0, twos)
+            twos := add(div(sub(0, twos), twos), 1)
+        }
+        prod0 |= prod1 * twos;
+
+        // Compute modular inverse of d using Newton's method
+        uint256 inverse = (3 * d) ^ 2;
+        inverse *= 2 - d * inverse;
+        inverse *= 2 - d * inverse;
+        inverse *= 2 - d * inverse;
+        inverse *= 2 - d * inverse;
+        inverse *= 2 - d * inverse;
+
+        result = prod0 * inverse;
     }
 
     /**

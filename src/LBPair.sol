@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import {ILBPair} from "./interfaces/ILBPair.sol";
 import {IComplianceModule} from "./compliance/interfaces/IComplianceModule.sol";
+import {IOracleModule} from "./interfaces/IOracleModule.sol";
 import {BinMath} from "./libraries/BinMath.sol";
 import {BitMath} from "./libraries/BitMath.sol";
 import {SwapHelper} from "./libraries/SwapHelper.sol";
@@ -68,6 +69,9 @@ contract LBPair is ILBPair {
 
     /// @notice Compliance module (address(0) = no compliance checks)
     address public compliance;
+
+    /// @notice Oracle module (address(0) = no oracle deviation fee)
+    address public oracle;
 
     /// @notice Bin storage: binId => packed BinState (256 bits)
     /// Bits 0-111:   reserveX (uint112)
@@ -235,6 +239,12 @@ contract LBPair is ILBPair {
         uint24 currentBinId = startBinId;
         uint24 binsCrossed;
 
+        // Query oracle deviation fee for accurate quotes
+        uint256 oracleDeviationFeeBps;
+        if (oracle != address(0)) {
+            oracleDeviationFeeBps = IOracleModule(oracle).getDeviationFee(address(this), startBinId);
+        }
+
         // Simulate swap across bins
         while (amountInRemaining > 0 && binsCrossed < SwapHelper.MAX_BINS_PER_SWAP) {
             BinState memory bin = _getBinState(currentBinId);
@@ -258,8 +268,8 @@ contract LBPair is ILBPair {
             }
         }
 
-        // Calculate total fees
-        uint256 feeBps = FeeHelper.getTotalFee(feeParameters, startBinId, currentBinId);
+        // Calculate total fees (includes oracle deviation)
+        uint256 feeBps = FeeHelper.getTotalFee(feeParameters, startBinId, currentBinId, oracleDeviationFeeBps);
         (fees, ) = FeeHelper.calculateFee(amountIn - amountInRemaining, feeBps);
     }
 
@@ -285,6 +295,12 @@ contract LBPair is ILBPair {
         uint24 currentBinId = startBinId;
         uint24 binsCrossed;
 
+        // Query oracle deviation fee once before the loop (0 if no oracle)
+        uint256 oracleDeviationFeeBps;
+        if (oracle != address(0)) {
+            oracleDeviationFeeBps = IOracleModule(oracle).getDeviationFee(address(this), startBinId);
+        }
+
         // Execute swap across bins
         while (amountInRemaining > 0 && binsCrossed < SwapHelper.MAX_BINS_PER_SWAP) {
             BinState memory bin = _getBinState(currentBinId);
@@ -296,8 +312,8 @@ contract LBPair is ILBPair {
                 params.swapForY
             );
 
-            // Calculate fees for this bin
-            uint256 feeBps = FeeHelper.getTotalFee(feeParameters, startBinId, currentBinId);
+            // Calculate fees for this bin (includes oracle deviation)
+            uint256 feeBps = FeeHelper.getTotalFee(feeParameters, startBinId, currentBinId, oracleDeviationFeeBps);
             (uint256 binFee, uint256 amountAfterFee) = FeeHelper.calculateFee(
                 binAmountIn,
                 feeBps
@@ -533,6 +549,14 @@ contract LBPair is ILBPair {
      */
     function setCompliance(address _compliance) external onlyFactory {
         compliance = _compliance;
+    }
+
+    /**
+     * @notice Set oracle module (only factory)
+     * @param _oracle Oracle module address (address(0) to disable)
+     */
+    function setOracle(address _oracle) external onlyFactory {
+        oracle = _oracle;
     }
 
     /**
