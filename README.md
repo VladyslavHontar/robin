@@ -151,7 +151,7 @@ See [DEPLOYMENT.md](./DEPLOYMENT.md) for the full deployment guide.
 
 ## Architecture
 
-![Architecture](diagrams/output/Robin_DLMM_Smart_Contract_Architecture.png)
+![Architecture](docs/diagrams/output/Robin_DLMM_Smart_Contract_Architecture.png)
 
 Four levels:
 1. **Entry** — LBFactory (admin) + LBRouter (users)
