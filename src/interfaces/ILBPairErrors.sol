@@ -97,4 +97,8 @@ interface ILBPairErrors {
     /// @param binsCount Number of bins
     /// @param maxBins Maximum allowed bins
     error LBPair__TooManyBins(uint256 binsCount, uint256 maxBins);
+
+    /// @notice Thrown when an address fails compliance verification
+    /// @param account The non-compliant address
+    error LBPair__NotCompliant(address account);
 }

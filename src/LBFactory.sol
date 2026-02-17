@@ -5,6 +5,7 @@ import {ILBFactory} from "./interfaces/ILBFactory.sol";
 import {ILBPairTypes} from "./interfaces/ILBPairTypes.sol";
 import {ILBPair} from "./interfaces/ILBPair.sol";
 import {LBPair} from "./LBPair.sol";
+import {IComplianceModule} from "./compliance/interfaces/IComplianceModule.sol";
 
 /**
  * @title LBFactory
@@ -35,6 +36,9 @@ contract LBFactory is ILBFactory {
 
     /// @notice Get pair by tokens and bin step: tokenA => tokenB => binStep => pair
     mapping(address => mapping(address => mapping(uint16 => address))) private _pairs;
+
+    /// @notice Compliance module address (optional)
+    address public complianceModule;
 
     /// @notice Constant bin steps (immutable after deployment)
     uint16 public constant BIN_STEP_ULTRA_TIGHT = 10; // 0.1%
@@ -164,6 +168,11 @@ contract LBFactory is ILBFactory {
         // Deploy new pair
         pair = address(new LBPair(token0, token1, binStep, activeId));
 
+        // Set compliance module if configured
+        if (complianceModule != address(0)) {
+            LBPair(pair).setCompliance(complianceModule);
+        }
+
         // Store pair
         _pairs[token0][token1][binStep] = pair;
         allPairs.push(pair);
@@ -218,6 +227,27 @@ contract LBFactory is ILBFactory {
         owner = newOwner;
 
         emit OwnershipTransferred(oldOwner, newOwner);
+    }
+
+    /**
+     * @notice Set the compliance module for all new pairs
+     * @param _complianceModule ComplianceModule address (address(0) to disable)
+     */
+    function setComplianceModule(address _complianceModule) external onlyOwner {
+        complianceModule = _complianceModule;
+    }
+
+    /**
+     * @notice Set compliance module on an existing pair
+     * @param pair Pair address
+     * @param _complianceModule ComplianceModule address (address(0) to disable)
+     */
+    function setPairCompliance(
+        address pair,
+        address _complianceModule
+    ) external onlyOwner {
+        if (pair == address(0)) revert LBFactory__ZeroAddress();
+        LBPair(pair).setCompliance(_complianceModule);
     }
 
     /**

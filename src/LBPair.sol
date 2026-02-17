@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {ILBPair} from "./interfaces/ILBPair.sol";
+import {IComplianceModule} from "./compliance/interfaces/IComplianceModule.sol";
 import {BinMath} from "./libraries/BinMath.sol";
 import {BitMath} from "./libraries/BitMath.sol";
 import {SwapHelper} from "./libraries/SwapHelper.sol";
@@ -65,6 +66,9 @@ contract LBPair is ILBPair {
     /// @notice Reentrancy guard
     uint256 private _status;
 
+    /// @notice Compliance module (address(0) = no compliance checks)
+    address public compliance;
+
     /// @notice Bin storage: binId => packed BinState (256 bits)
     /// Bits 0-111:   reserveX (uint112)
     /// Bits 112-223: reserveY (uint112)
@@ -108,6 +112,16 @@ contract LBPair is ILBPair {
     modifier ensure(uint256 deadline) {
         if (block.timestamp > deadline) {
             revert LBPair__DeadlineExceeded(deadline, block.timestamp);
+        }
+        _;
+    }
+
+    /// @notice Validates compliance for an address
+    modifier onlyCompliant(address account) {
+        if (compliance != address(0)) {
+            if (!IComplianceModule(compliance).isVerified(account)) {
+                revert LBPair__NotCompliant(account);
+            }
         }
         _;
     }
@@ -260,7 +274,7 @@ contract LBPair is ILBPair {
      */
     function swap(
         SwapParameters calldata params
-    ) external override nonReentrant ensure(params.deadline) returns (SwapResult memory result) {
+    ) external override nonReentrant ensure(params.deadline) onlyCompliant(params.to) returns (SwapResult memory result) {
         if (params.amountIn == 0) revert LBPair__ZeroAmount();
         if (params.to == address(0)) revert LBPair__ZeroAddress();
 
@@ -367,7 +381,7 @@ contract LBPair is ILBPair {
      */
     function mint(
         LiquidityParameters calldata params
-    ) external override nonReentrant ensure(params.deadline) returns (uint256[] memory shares) {
+    ) external override nonReentrant ensure(params.deadline) onlyCompliant(params.to) returns (uint256[] memory shares) {
         if (params.binIds.length == 0) revert LBPair__InvalidLiquidityDistribution();
         if (params.binIds.length > MAX_BINS_PER_OPERATION) {
             revert LBPair__TooManyBins(params.binIds.length, MAX_BINS_PER_OPERATION);
@@ -435,6 +449,7 @@ contract LBPair is ILBPair {
         override
         nonReentrant
         ensure(params.deadline)
+        onlyCompliant(params.to)
         returns (uint256 amountX, uint256 amountY)
     {
         if (params.binIds.length == 0) revert LBPair__InvalidLiquidityDistribution();
@@ -510,6 +525,14 @@ contract LBPair is ILBPair {
         FeeHelper.validateFeeParameters(_feeParams);
         feeParameters = _feeParams;
         emit FeeParametersSet(_feeParams.baseFee, _feeParams.maxVolatilityFee);
+    }
+
+    /**
+     * @notice Set compliance module (only factory)
+     * @param _compliance Compliance module address (address(0) to disable)
+     */
+    function setCompliance(address _compliance) external onlyFactory {
+        compliance = _compliance;
     }
 
     /**

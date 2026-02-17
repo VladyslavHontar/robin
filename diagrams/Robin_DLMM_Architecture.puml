@@ -1,0 +1,153 @@
+@startuml Robin_DLMM_Smart_Contract_Architecture
+'===========================================
+' Robin DLMM - Smart Contract Architecture
+' On-Chain Contracts Only
+'===========================================
+
+skinparam backgroundColor #FEFEFE
+skinparam defaultFontSize 11
+skinparam defaultFontName Arial
+skinparam roundCorner 8
+skinparam shadowing false
+skinparam nodesep 60
+skinparam ranksep 50
+
+skinparam package {
+    BackgroundColor #FFFFFF
+    BorderColor #CCCCCC
+    FontSize 13
+    FontStyle bold
+}
+
+skinparam rectangle {
+    FontSize 10
+}
+
+skinparam arrow {
+    Color #666666
+    Thickness 1
+}
+
+skinparam linetype ortho
+
+title <size:18>Robin DLMM - Smart Contract Architecture</size>\n<size:10>Compliance-Enabled DEX for Tokenized Stocks on Robinhood Chain</size>
+
+' =============================================================
+'  CALLERS
+' =============================================================
+actor "Trader / LP" as user #B3E5FC
+actor "Owner / Agent" as admin #FFCCBC
+
+' =============================================================
+'  LEVEL 1 — ENTRY
+' =============================================================
+package "Level 1 — Entry (User-Facing)" #E3F2FD {
+    rectangle "LBFactory\n...\ncreatePair()\ngetPair()\nsetFeeParameters()\nsetComplianceModule()\ntransferOwnership()" as factory #BBDEFB
+
+    rectangle "LBRouter\n...\nswapExactTokensForTokens()\naddLiquidity()\nremoveLiquidity()\ngetSwapQuote()" as router #BBDEFB
+}
+
+' =============================================================
+'  LEVEL 2 — CORE ENGINE
+' =============================================================
+package "Level 2 — Core Engine" #E8F5E9 {
+    rectangle "ComplianceModule\n...\ncanTransfer()\nisVerified()\nsetCountryAllowed()\nsetTransferLimits()" as compliance #FFF176
+
+    rectangle "LBPair  (1 per token pair)\n...\nswap()  /  mint()  /  burn()\ncollectFees()  /  balanceOf()\ngetBinReserves()  /  getSwapOut()" as pair #A5D6A7
+}
+
+' =============================================================
+'  LEVEL 3 — SUPPORT (three columns)
+' =============================================================
+package "Level 3 — Identity (ERC-3643)" #FFF9C4 {
+    rectangle "IdentityRegistry\n...\nisVerified()\nregisterIdentity()\ndeleteIdentity()\ninvestorCountry()" as registry #FFF176
+
+    rectangle "Identity (OnchainID)\n...\naddClaim()\ngetClaim()\ngetClaimIdsByTopic()" as identity #FFF176
+
+    rectangle "ClaimIssuer\n...\nisClaimValid()\nrevokeClaim()" as issuer #FFF176
+}
+
+package "Level 3 — Libraries (Stateless)" #F3E5F5 {
+    rectangle "BinMath\n...\ngetPriceFromId()\ngetIdFromPrice()" as binMath #E1BEE7
+
+    rectangle "SwapHelper\n...\ngetAmountOutSingleBin()\nupdateBinReserves()" as swapHelper #E1BEE7
+
+    rectangle "BitMath\n...\nclosestBitRight()\nsetBit() / clearBit()" as bitMath #E1BEE7
+
+    rectangle "FeeHelper\n...\ngetTotalFee()\napplyTimeAdjustment()" as feeHelper #E1BEE7
+}
+
+package "Level 3 — External (On-Chain)" #FFF8E1 {
+    rectangle "ERC-20 Tokens\n...\ntokenX / tokenY\ntransferFrom()\ntransfer()" as tokens #FFE082
+
+    rectangle "Chainlink Oracle\n...\nlatestRoundData()\nstock price feeds" as chainlink #FFE082
+}
+
+' =============================================================
+'  LEVEL 4 — FOUNDATION
+' =============================================================
+package "Level 4 — Shared Types & Interfaces" #ECEFF1 {
+    rectangle "ILBPairTypes\n...\nBinState, FeeParameters,\nSwapParameters, SwapResult,\nLiquidityParameters" as types #CFD8DC
+
+    rectangle "Interfaces\n...\nILBPair, ILBFactory,\nIComplianceModule,\nIIdentityRegistry, IIdentity" as ifaces #CFD8DC
+
+    rectangle "ILBPairErrors / Events\n...\n24 custom errors\n9 events" as errEvt #CFD8DC
+}
+
+' =============================================================
+'  CONNECTIONS — Callers
+' =============================================================
+admin -down-> factory
+user -down-> router
+
+' =============================================================
+'  CONNECTIONS — Level 1 internal
+' =============================================================
+factory -right-> router : "  "
+
+' =============================================================
+'  CONNECTIONS — Level 1 → Level 2
+' =============================================================
+factory -down-> compliance : "configure"
+factory -down-> pair : "creates"
+router -down-> pair : "swap() / mint() / burn()"
+
+' =============================================================
+'  CONNECTIONS — Level 2 internal
+' =============================================================
+pair -left-> compliance : "canTransfer()"
+
+' =============================================================
+'  CONNECTIONS — Level 2 → Level 3
+' =============================================================
+compliance -down-> registry : "isVerified()"
+pair -down-> binMath
+pair -down-> swapHelper
+pair -down-> tokens : "transfer()"
+
+' =============================================================
+'  CONNECTIONS — Level 3 internal
+' =============================================================
+registry -down-> identity : "getClaim()"
+identity -down-> issuer : "isClaimValid()"
+
+' =============================================================
+'  CONNECTIONS — Level 3 → Level 4
+' =============================================================
+swapHelper -down-> types : "uses"
+feeHelper -down-> types : "uses"
+
+' =============================================================
+'  LAYOUT — Force three-column structure at Level 3
+' =============================================================
+registry -[hidden]right- binMath
+identity -[hidden]right- swapHelper
+issuer -[hidden]right- bitMath
+binMath -[hidden]right- bitMath
+swapHelper -[hidden]right- feeHelper
+bitMath -[hidden]right- tokens
+feeHelper -[hidden]right- chainlink
+types -[hidden]right- ifaces
+ifaces -[hidden]right- errEvt
+
+@enduml
