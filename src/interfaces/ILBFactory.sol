@@ -19,6 +19,7 @@ interface ILBFactory {
     error LBFactory__Unauthorized(address caller);
     error LBFactory__IdenticalTokens();
     error LBFactory__InvalidTokenOrder();
+    error LBFactory__NotERC20(address token);
 
     // =============================================================
     //                          EVENTS
@@ -76,6 +77,22 @@ interface ILBFactory {
      * @return Number of pairs
      */
     function allPairsLength() external view returns (uint256);
+
+    /**
+     * @notice Compute the deterministic address of a pair without any chain query.
+     * @dev Uses CREATE2: address = keccak256(0xff ++ factory ++ salt ++ initCodeHash)
+     *      salt = keccak256(token0, token1, binStep) where token0 < token1.
+     *      Works even before the pair is deployed — equivalent to Solana PDA derivation.
+     * @param tokenA One token of the pair (order doesn't matter)
+     * @param tokenB Other token of the pair
+     * @param binStep Bin step in basis points
+     * @return pair Deterministic pair address
+     */
+    function computePairAddress(
+        address tokenA,
+        address tokenB,
+        uint16 binStep
+    ) external view returns (address pair);
 
     /**
      * @notice Get pair at index

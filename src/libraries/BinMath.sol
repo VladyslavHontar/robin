@@ -87,10 +87,11 @@ library BinMath {
             return INITIAL_BIN_ID;
         }
 
-        // Bound the search to prevent overflow in _pow.
-        // Max representable exponent: (1 + binStep/10000)^n * SCALE < 2^256
-        // → n < 128 * ln(2) / ln(1 + binStep/10000) ≈ 800000 / binStep
-        uint24 maxDelta = uint24(800_000 / uint256(binStep));
+        // Bound the search to prevent intermediate overflow in _pow.
+        // The safe limit accounts for binary exponentiation squaring:
+        // (1+s)^(2^k) must stay within mulDivDown capacity.
+        // Conservative bound: ≈ 64*ln(2)/ln(1+binStep/10000) ≈ 440000/binStep
+        uint24 maxDelta = uint24(440_000 / uint256(binStep));
         if (maxDelta > INITIAL_BIN_ID) maxDelta = INITIAL_BIN_ID; // Prevent underflow
 
         bool searchUp = price > SCALE;
@@ -162,7 +163,7 @@ library BinMath {
     ) internal pure returns (uint256 ratio) {
         uint256 price1 = getPriceFromId(binId1, binStep);
         uint256 price2 = getPriceFromId(binId2, binStep);
-        ratio = (price1 * SCALE) / price2;
+        ratio = _mulDivDown(price1, SCALE, price2);
     }
 
     /**
@@ -183,13 +184,16 @@ library BinMath {
 
         result = SCALE; // Start with 1.0 scaled
 
-        // Binary exponentiation
+        // Binary exponentiation — avoids the final unnecessary squaring
+        // to prevent intermediate overflow for large exponents.
         while (exp > 0) {
             if (exp & 1 == 1) {
                 result = _mulDivDown(result, base, SCALE);
             }
-            base = _mulDivDown(base, base, SCALE);
             exp >>= 1;
+            if (exp > 0) {
+                base = _mulDivDown(base, base, SCALE);
+            }
         }
     }
 
@@ -201,7 +205,7 @@ library BinMath {
      * @param d Divisor
      * @return result (x * y) / d rounded down
      */
-    function _mulDivDown(uint256 x, uint256 y, uint256 d) private pure returns (uint256 result) {
+    function _mulDivDown(uint256 x, uint256 y, uint256 d) internal pure returns (uint256 result) {
         // 512-bit multiply [prod1 prod0] = x * y
         uint256 prod0;
         uint256 prod1;
@@ -228,24 +232,30 @@ library BinMath {
             prod0 := sub(prod0, remainder)
         }
 
-        // Factor powers of two out of denominator
-        uint256 twos = d & (~d + 1);
-        assembly {
-            d := div(d, twos)
-            prod0 := div(prod0, twos)
-            twos := add(div(sub(0, twos), twos), 1)
+        // Factor powers of two out of denominator and compute modular inverse.
+        // All arithmetic below is modular (mod 2^256) — must use unchecked.
+        unchecked {
+            uint256 twos = d & (~d + 1);
+            assembly {
+                d := div(d, twos)
+                prod0 := div(prod0, twos)
+                twos := add(div(sub(0, twos), twos), 1)
+            }
+            prod0 |= prod1 * twos;
+
+            // Compute modular inverse of d using Newton's method.
+            // Starting approximation: inverse ≡ (3*d) ^ 2 (mod 2^4) — 4 correct bits.
+            // Each iteration doubles the precision: 4→8→16→32→64→128→256 bits.
+            uint256 inverse = (3 * d) ^ 2;
+            inverse *= 2 - d * inverse; // 8 bits
+            inverse *= 2 - d * inverse; // 16 bits
+            inverse *= 2 - d * inverse; // 32 bits
+            inverse *= 2 - d * inverse; // 64 bits
+            inverse *= 2 - d * inverse; // 128 bits
+            inverse *= 2 - d * inverse; // 256 bits
+
+            result = prod0 * inverse;
         }
-        prod0 |= prod1 * twos;
-
-        // Compute modular inverse of d using Newton's method
-        uint256 inverse = (3 * d) ^ 2;
-        inverse *= 2 - d * inverse;
-        inverse *= 2 - d * inverse;
-        inverse *= 2 - d * inverse;
-        inverse *= 2 - d * inverse;
-        inverse *= 2 - d * inverse;
-
-        result = prod0 * inverse;
     }
 
     /**

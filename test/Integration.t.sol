@@ -27,7 +27,8 @@ contract IntegrationTest is Test {
 
     function setUp() public {
         // Deploy contracts
-        factory = new LBFactory(address(this), address(this));
+        LBPair implementation = new LBPair();
+        factory = new LBFactory(address(this), address(this), address(implementation));
         router = new LBRouter(address(factory));
 
         // Deploy tokens
@@ -399,5 +400,48 @@ contract IntegrationTest is Test {
         });
 
         pair.mint(params);
+    }
+
+    // =============================================================
+    //              CREATE2 / PAIR ADDRESS DERIVATION
+    // =============================================================
+
+    /**
+     * @notice computePairAddress must return the actual deployed pair address.
+     * @dev This is the Solana PDA equivalent: derive any pair address offline
+     *      using only (factory, tokenA, tokenB, binStep) — no chain query needed.
+     */
+    function testComputePairAddress_MatchesDeployed() public view {
+        address computed = factory.computePairAddress(
+            address(tokenX),
+            address(tokenY),
+            BIN_STEP
+        );
+        assertEq(computed, address(pair), "Derived address must match deployed pair");
+    }
+
+    /// @notice Order of tokens passed must not matter (factory sorts internally)
+    function testComputePairAddress_TokenOrderInvariant() public view {
+        address ab = factory.computePairAddress(address(tokenX), address(tokenY), BIN_STEP);
+        address ba = factory.computePairAddress(address(tokenY), address(tokenX), BIN_STEP);
+        assertEq(ab, ba, "Address must be the same regardless of token order");
+    }
+
+    /// @notice Address for a non-existent pair must differ from the deployed pair
+    function testComputePairAddress_BeforeDeployment() public {
+        // Deploy a fresh token not yet in a pair
+        MockERC20 tokenZ = new MockERC20("Token Z", "Z", 18);
+
+        // Compute address before pair is created
+        address predicted = factory.computePairAddress(address(tokenX), address(tokenZ), BIN_STEP);
+
+        // Verify pair doesn't exist yet
+        assertEq(factory.getPair(address(tokenX), address(tokenZ), BIN_STEP), address(0));
+
+        // Deploy the pair
+        address created = factory.createPair(address(tokenX), address(tokenZ), BIN_STEP, INITIAL_BIN_ID);
+
+        // Prediction must match actual address
+        assertEq(predicted, created, "Pre-deployment prediction must match created address");
     }
 }

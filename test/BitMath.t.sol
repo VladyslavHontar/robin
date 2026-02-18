@@ -1,10 +1,32 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import "forge-std/Test.sol";
-import "../src/libraries/BitMath.sol";
+import {Test} from "forge-std/Test.sol";
+import {BitMath} from "../src/libraries/BitMath.sol";
+
+/// @notice Wrapper to expose internal BitMath functions as external calls
+/// so vm.expectRevert works correctly (it needs an external call boundary).
+contract BitMathWrapper {
+    function mostSignificantBit(uint256 x) external pure returns (uint8) {
+        return BitMath.mostSignificantBit(x);
+    }
+
+    function leastSignificantBit(uint256 x) external pure returns (uint8) {
+        return BitMath.leastSignificantBit(x);
+    }
+
+    function createBitMask(uint8 from, uint8 to) external pure returns (uint256) {
+        return BitMath.createBitMask(from, to);
+    }
+}
 
 contract BitMathTest is Test {
+    BitMathWrapper wrapper;
+
+    function setUp() public {
+        wrapper = new BitMathWrapper();
+    }
+
     function testMostSignificantBit_PowerOfTwo() public pure {
         // Powers of 2 have exactly one bit set
         assertEq(BitMath.mostSignificantBit(1), 0, "MSB of 1 should be 0");
@@ -175,7 +197,10 @@ contract BitMathTest is Test {
         assertEq(bit, 100, "After clearing 50, closest right should be 100");
     }
 
-    // Fuzz tests
+    // ===========================
+    //       FUZZ TESTS
+    // ===========================
+
     function testFuzz_MostSignificantBit(uint256 x) public pure {
         vm.assume(x > 0);
 
@@ -213,31 +238,33 @@ contract BitMathTest is Test {
     }
 
     function testFuzz_SetClearBit(uint256 bitmap, uint8 bit) public pure {
-        // Setting a bit then clearing it should return original
+        // Invariant: clearBit(setBit(x, b), b) always results in bit b being clear.
+        // This equals clearBit(x, b) — the bit is always cleared regardless of original state.
         uint256 withBitSet = BitMath.setBit(bitmap, bit);
         uint256 result = BitMath.clearBit(withBitSet, bit);
 
-        // If bit was already set, result should match original
-        // If bit was not set, clearing after setting should return original
-        if (BitMath.isBitSet(bitmap, bit)) {
-            assertEq(result, bitmap, "Clear after set should return original if bit was set");
-        } else {
-            assertEq(result, bitmap, "Clear after set should return original if bit was not set");
-        }
+        uint256 expected = bitmap & ~(uint256(1) << bit);
+        assertEq(result, expected, "Set then clear should equal clearing original");
+        assertFalse(BitMath.isBitSet(result, bit), "Bit should be clear after set+clear");
     }
+
+    // ===========================
+    //       REVERT TESTS
+    // ===========================
+    // Use wrapper contract for external call boundary so vm.expectRevert works.
 
     function testRevert_MostSignificantBit_Zero() public {
         vm.expectRevert("BitMath: zero has no msb");
-        BitMath.mostSignificantBit(0);
+        wrapper.mostSignificantBit(0);
     }
 
     function testRevert_LeastSignificantBit_Zero() public {
         vm.expectRevert("BitMath: zero has no lsb");
-        BitMath.leastSignificantBit(0);
+        wrapper.leastSignificantBit(0);
     }
 
     function testRevert_CreateBitMask_InvalidRange() public {
         vm.expectRevert("BitMath: invalid range");
-        BitMath.createBitMask(5, 3); // from > to
+        wrapper.createBitMask(5, 3); // from > to
     }
 }

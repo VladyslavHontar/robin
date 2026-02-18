@@ -4,12 +4,10 @@ pragma solidity ^0.8.28;
 import "forge-std/Script.sol";
 import "../src/LBFactory.sol";
 import "../src/WETH.sol";
-import "../src/compliance/ComplianceModule.sol";
 
 contract DeployPairs is Script {
     // Existing deployed contracts
     address constant FACTORY = 0x30f8819710611d80Ce22d57947223F33C2fe8C9E;
-    address constant COMPLIANCE = 0xEFb56C901723c03DcddC8Bf38e2737d58D71c26B;
 
     // Real Robinhood testnet tokens
     address constant AMZN = 0x5884aD2f920c162CFBbACc88C9C51AA75eC09E02;
@@ -30,7 +28,6 @@ contract DeployPairs is Script {
         console.log("WETH:", address(weth));
 
         LBFactory factory = LBFactory(FACTORY);
-        ComplianceModule compliance = ComplianceModule(COMPLIANCE);
 
         // Create pairs: token/WETH with 50bp bin step
         address amznWeth = factory.createPair(AMZN, address(weth), 50, 8_388_608);
@@ -41,11 +38,6 @@ contract DeployPairs is Script {
 
         address nflxWeth = factory.createPair(NFLX, address(weth), 50, 8_388_608);
         console.log("NFLX/WETH (50bp):", nflxWeth);
-
-        // Whitelist new pairs in compliance
-        compliance.setWhitelisted(amznWeth, true);
-        compliance.setWhitelisted(amdWeth, true);
-        compliance.setWhitelisted(nflxWeth, true);
 
         vm.stopBroadcast();
 

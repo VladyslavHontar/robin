@@ -1,14 +1,36 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import "forge-std/Test.sol";
-import "../src/libraries/BinMath.sol";
+import {Test, console} from "forge-std/Test.sol";
+import {BinMath} from "../src/libraries/BinMath.sol";
+
+/// @notice Wrapper to expose internal BinMath functions as external calls
+/// so vm.expectRevert works correctly (it needs an external call boundary).
+contract BinMathWrapper {
+    function getPriceFromId(uint24 binId, uint16 binStep) external pure returns (uint256) {
+        return BinMath.getPriceFromId(binId, binStep);
+    }
+
+    function getIdFromPrice(uint256 price, uint16 binStep) external pure returns (uint24) {
+        return BinMath.getIdFromPrice(price, binStep);
+    }
+
+    function getPriceRatio(uint24 binId1, uint24 binId2, uint16 binStep) external pure returns (uint256) {
+        return BinMath.getPriceRatio(binId1, binId2, binStep);
+    }
+}
 
 contract BinMathTest is Test {
     using BinMath for *;
 
     uint24 constant INITIAL_BIN_ID = BinMath.INITIAL_BIN_ID;
     uint256 constant SCALE = BinMath.SCALE;
+
+    BinMathWrapper wrapper;
+
+    function setUp() public {
+        wrapper = new BinMathWrapper();
+    }
 
     function testGetPriceFromId_InitialBin() public pure {
         // At initial bin, price should be exactly SCALE (1.0)
@@ -143,12 +165,17 @@ contract BinMathTest is Test {
 
         uint256 ratio = BinMath.getPriceRatio(binId1, binId2, 100);
 
-        // Ratio should be (1.01^10) / (1.01^5) = 1.01^5
+        // Ratio should be (1.01^10) / (1.01^5) = 1.01^5 ≈ 1.05101
         uint256 price1 = BinMath.getPriceFromId(binId1, 100);
         uint256 price2 = BinMath.getPriceFromId(binId2, 100);
-        uint256 expectedRatio = (price1 * SCALE) / price2;
+        uint256 expectedRatio = BinMath._mulDivDown(price1, SCALE, price2);
 
         assertEq(ratio, expectedRatio, "Price ratio should match manual calculation");
+
+        // Sanity: ratio should be ~1.05x SCALE (5 bins at 1%)
+        uint256 expected = (SCALE * 10510) / 10000;
+        uint256 tolerance = expected / 100;
+        assertApproxEqAbs(ratio, expected, tolerance, "Ratio should be ~1.051x");
     }
 
     function testFromHumanPrice() public pure {
@@ -179,15 +206,21 @@ contract BinMathTest is Test {
         assertEq(recovered, original, "Round-trip conversion should preserve value");
     }
 
-    // Fuzz tests
+    // ===========================
+    //       FUZZ TESTS
+    // ===========================
+
     function testFuzz_GetPriceFromId(uint24 binId, uint16 binStep) public pure {
-        // Constrain inputs to valid ranges
         binStep = uint16(bound(binStep, 1, BinMath.MAX_BIN_STEP));
 
-        // Should not revert for any valid bin ID and bin step
+        // Bound binId to match the safe range used in the library.
+        // Conservative bound for intermediate overflow in _pow: ~440000/binStep
+        uint24 maxDelta = uint24(bound(440_000 / uint256(binStep), 1, uint256(INITIAL_BIN_ID)));
+        binId = uint24(bound(binId, INITIAL_BIN_ID - maxDelta, INITIAL_BIN_ID + maxDelta));
+
         uint256 price = BinMath.getPriceFromId(binId, binStep);
 
-        // Price should always be positive
+        // Price should always be positive within representable range
         assertTrue(price > 0, "Price should be positive");
     }
 
@@ -203,18 +236,23 @@ contract BinMathTest is Test {
         assertTrue(binId < type(uint24).max, "Bin ID should be valid");
     }
 
+    // ===========================
+    //       REVERT TESTS
+    // ===========================
+    // Use wrapper contract for external call boundary so vm.expectRevert works.
+
     function testRevert_InvalidBinStep_Zero() public {
         vm.expectRevert("BinMath: invalid bin step");
-        BinMath.getPriceFromId(INITIAL_BIN_ID, 0);
+        wrapper.getPriceFromId(INITIAL_BIN_ID, 0);
     }
 
     function testRevert_InvalidBinStep_TooHigh() public {
         vm.expectRevert("BinMath: invalid bin step");
-        BinMath.getPriceFromId(INITIAL_BIN_ID, 10001);
+        wrapper.getPriceFromId(INITIAL_BIN_ID, 10001);
     }
 
     function testRevert_InvalidPrice_Zero() public {
         vm.expectRevert("BinMath: price must be positive");
-        BinMath.getIdFromPrice(0, 100);
+        wrapper.getIdFromPrice(0, 100);
     }
 }

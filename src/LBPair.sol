@@ -2,25 +2,28 @@
 pragma solidity ^0.8.28;
 
 import {ILBPair} from "./interfaces/ILBPair.sol";
-import {IComplianceModule} from "./compliance/interfaces/IComplianceModule.sol";
 import {IOracleModule} from "./interfaces/IOracleModule.sol";
 import {BinMath} from "./libraries/BinMath.sol";
 import {BitMath} from "./libraries/BitMath.sol";
 import {SwapHelper} from "./libraries/SwapHelper.sol";
 import {FeeHelper} from "./libraries/FeeHelper.sol";
+import {Initializable} from "openzeppelin-contracts/contracts/proxy/utils/Initializable.sol";
 
 /**
  * @title LBPair
  * @notice Core Liquidity Book Pair contract for DLMM
- * @dev Implements concentrated liquidity with discrete bins
+ * @dev Proxy-compatible implementation using OpenZeppelin Initializable.
  *
  * Architecture:
+ * - Deployed once as an implementation contract behind a BeaconProxy.
+ * - Each pair is a BeaconProxy that delegates all calls here.
+ * - Upgrading the Beacon implementation upgrades ALL pairs simultaneously
+ *   (equivalent to Solana program redeployment — state stays in proxies).
  * - Bins store reserves in packed format (112+112+32 bits)
  * - Bitmap index enables O(1) bin lookup instead of O(n) iteration
  * - Fees auto-compound into reserves (Trader Joe V2.1 style)
- * - ERC-1155 positions for fungibility within bins
  */
-contract LBPair is ILBPair {
+contract LBPair is ILBPair, Initializable {
     using BinMath for uint24;
     using BitMath for uint256;
 
@@ -43,16 +46,16 @@ contract LBPair is ILBPair {
     // =============================================================
 
     /// @notice Token X address
-    address public immutable override tokenX;
+    address public override tokenX;
 
     /// @notice Token Y address
-    address public immutable override tokenY;
+    address public override tokenY;
 
     /// @notice Bin step in basis points
-    uint16 public immutable override binStep;
+    uint16 public override binStep;
 
     /// @notice Factory address (for access control)
-    address public immutable factory;
+    address public factory;
 
     /// @notice Current active bin ID
     uint24 public override activeId;
@@ -66,9 +69,6 @@ contract LBPair is ILBPair {
 
     /// @notice Reentrancy guard
     uint256 private _status;
-
-    /// @notice Compliance module (address(0) = no compliance checks)
-    address public compliance;
 
     /// @notice Oracle module (address(0) = no oracle deviation fee)
     address public oracle;
@@ -93,6 +93,9 @@ contract LBPair is ILBPair {
 
     /// @notice Next liquidity index to use
     uint32 private _nextLiquidityIndex;
+
+    /// @notice Storage gap for future upgrades (beacon proxy pattern)
+    uint256[50] private __gap;
 
     // =============================================================
     //                         MODIFIERS
@@ -120,29 +123,34 @@ contract LBPair is ILBPair {
         _;
     }
 
-    /// @notice Validates compliance for an address
-    modifier onlyCompliant(address account) {
-        if (compliance != address(0)) {
-            if (!IComplianceModule(compliance).isVerified(account)) {
-                revert LBPair__NotCompliant(account);
-            }
-        }
-        _;
+    // =============================================================
+    //                        CONSTRUCTOR / INITIALIZER
+    // =============================================================
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        // Lock the implementation contract so it cannot be initialized directly.
+        // Each BeaconProxy calls initialize() instead.
+        _disableInitializers();
     }
 
-    // =============================================================
-    //                        CONSTRUCTOR
-    // =============================================================
-
     /**
-     * @notice Initialize the pair
+     * @notice Initialize the pair (called by BeaconProxy on deployment)
      * @param _tokenX Token X address
      * @param _tokenY Token Y address
      * @param _binStep Bin step in basis points
      * @param _activeId Initial active bin ID
+     * @param _factory Factory address (set by factory, not msg.sender, since proxy forwards the call)
      */
-    constructor(address _tokenX, address _tokenY, uint16 _binStep, uint24 _activeId) {
+    function initialize(
+        address _tokenX,
+        address _tokenY,
+        uint16 _binStep,
+        uint24 _activeId,
+        address _factory
+    ) external initializer {
         if (_tokenX == address(0) || _tokenY == address(0)) revert LBPair__ZeroAddress();
+        if (_factory == address(0)) revert LBPair__ZeroAddress();
         if (_binStep == 0 || _binStep > BinMath.MAX_BIN_STEP) {
             revert LBPair__InvalidBinStep(_binStep);
         }
@@ -151,7 +159,7 @@ contract LBPair is ILBPair {
         tokenY = _tokenY;
         binStep = _binStep;
         activeId = _activeId;
-        factory = msg.sender;
+        factory = _factory;
         _status = NOT_ENTERED;
 
         // Initialize with default stock fee parameters
@@ -245,20 +253,25 @@ contract LBPair is ILBPair {
             oracleDeviationFeeBps = IOracleModule(oracle).getDeviationFee(address(this), startBinId);
         }
 
-        // Simulate swap across bins
+        // Simulate swap across bins (fee-on-input, constant sum)
         while (amountInRemaining > 0 && binsCrossed < SwapHelper.MAX_BINS_PER_SWAP) {
             BinState memory bin = _getBinState(currentBinId);
+            uint256 reserveOut = swapForY ? uint256(bin.reserveY) : uint256(bin.reserveX);
+            if (reserveOut == 0) break;
 
-            (uint256 binAmountOut, uint256 binAmountIn) = SwapHelper.getAmountOutSingleBin(
-                bin,
-                amountInRemaining,
-                swapForY
-            );
+            uint256 feeBps = FeeHelper.getTotalFee(feeParameters, startBinId, currentBinId, oracleDeviationFeeBps);
 
-            amountOut += binAmountOut;
-            amountInRemaining -= binAmountIn;
+            // Max total input (including fee) this bin can accept
+            uint256 maxTotalInput = (reserveOut * FeeHelper.BASIS_POINT_MAX) / (FeeHelper.BASIS_POINT_MAX - feeBps);
+            uint256 totalConsumed = amountInRemaining < maxTotalInput ? amountInRemaining : maxTotalInput;
 
-            if (SwapHelper.isBinDepleted(bin, binAmountIn, swapForY)) {
+            (uint256 binFee, uint256 effectiveInput) = FeeHelper.calculateFee(totalConsumed, feeBps);
+
+            amountOut += effectiveInput; // constant sum: output = post-fee input
+            fees += binFee;
+            amountInRemaining -= totalConsumed;
+
+            if (effectiveInput >= reserveOut) {
                 binsCrossed++;
                 uint24 nextBin = _getNextNonEmptyBin(currentBinId, swapForY);
                 if (nextBin == currentBinId) break;
@@ -267,10 +280,6 @@ contract LBPair is ILBPair {
                 break;
             }
         }
-
-        // Calculate total fees (includes oracle deviation)
-        uint256 feeBps = FeeHelper.getTotalFee(feeParameters, startBinId, currentBinId, oracleDeviationFeeBps);
-        (fees, ) = FeeHelper.calculateFee(amountIn - amountInRemaining, feeBps);
     }
 
     // =============================================================
@@ -279,12 +288,14 @@ contract LBPair is ILBPair {
 
     /**
      * @notice Execute a swap
+     * @dev Fee-on-input: fee is taken from the input amount. LP share of fee auto-compounds
+     *      into bin reserves (input token side). Protocol share is tracked separately.
      * @param params Swap parameters
      * @return result Swap result with output amount and fees
      */
     function swap(
         SwapParameters calldata params
-    ) external override nonReentrant ensure(params.deadline) onlyCompliant(params.to) returns (SwapResult memory result) {
+    ) external override nonReentrant ensure(params.deadline) returns (SwapResult memory result) {
         if (params.amountIn == 0) revert LBPair__ZeroAmount();
         if (params.to == address(0)) revert LBPair__ZeroAddress();
 
@@ -301,38 +312,59 @@ contract LBPair is ILBPair {
             oracleDeviationFeeBps = IOracleModule(oracle).getDeviationFee(address(this), startBinId);
         }
 
-        // Execute swap across bins
+        // Execute swap across bins (fee-on-input, constant sum)
         while (amountInRemaining > 0 && binsCrossed < SwapHelper.MAX_BINS_PER_SWAP) {
             BinState memory bin = _getBinState(currentBinId);
 
-            // Calculate swap for this bin
-            (uint256 binAmountOut, uint256 binAmountIn) = SwapHelper.getAmountOutSingleBin(
-                bin,
-                amountInRemaining,
-                params.swapForY
-            );
+            // Get output reserve for this bin
+            uint256 reserveOut = params.swapForY ? uint256(bin.reserveY) : uint256(bin.reserveX);
+            if (reserveOut == 0) break;
 
-            // Calculate fees for this bin (includes oracle deviation)
+            // Calculate fee for this bin (includes oracle deviation)
             uint256 feeBps = FeeHelper.getTotalFee(feeParameters, startBinId, currentBinId, oracleDeviationFeeBps);
-            (uint256 binFee, uint256 amountAfterFee) = FeeHelper.calculateFee(
-                binAmountIn,
-                feeBps
-            );
 
-            // Update amounts
+            // Max total input (including fee) this bin can accept:
+            // effectiveInput = totalInput * (1 - feeBps/10000) <= reserveOut
+            // => totalInput <= reserveOut * 10000 / (10000 - feeBps)
+            uint256 maxTotalInput = (reserveOut * FeeHelper.BASIS_POINT_MAX) / (FeeHelper.BASIS_POINT_MAX - feeBps);
+            uint256 totalConsumed = amountInRemaining < maxTotalInput ? amountInRemaining : maxTotalInput;
+
+            // Split consumed amount into fee and effective swap input
+            (uint256 binFee, uint256 effectiveInput) = FeeHelper.calculateFee(totalConsumed, feeBps);
+
+            // Constant sum: output = effectiveInput (1:1 within a bin)
+            uint256 binAmountOut = effectiveInput;
+
+            // Split fee between LP (auto-compound) and protocol
+            (uint256 lpFee, uint256 protocolFee) = FeeHelper.splitFee(binFee, feeParameters.protocolShare);
+
+            // Update totals
             totalAmountOut += binAmountOut;
             totalFees += binFee;
-            amountInRemaining -= binAmountIn;
+            amountInRemaining -= totalConsumed;
 
-            // Update bin reserves (with fees auto-compounded)
-            SwapHelper.updateBinReserves(bin, binAmountIn, binAmountOut, params.swapForY);
+            // Update bin reserves:
+            // Input reserve += effectiveInput + lpFee (LP fee auto-compounds as input token)
+            // Output reserve -= binAmountOut
+            if (params.swapForY) {
+                bin.reserveX += uint112(effectiveInput + lpFee);
+                bin.reserveY -= uint112(binAmountOut);
+            } else {
+                bin.reserveY += uint112(effectiveInput + lpFee);
+                bin.reserveX -= uint112(binAmountOut);
+            }
             _setBinState(currentBinId, bin);
 
-            // Check if bin depleted
-            if (SwapHelper.isBinDepleted(bin, binAmountIn, params.swapForY)) {
-                binsCrossed++;
+            // Track protocol fees (denominated in input token)
+            if (params.swapForY) {
+                protocolFeesX += uint128(protocolFee);
+            } else {
+                protocolFeesY += uint128(protocolFee);
+            }
 
-                // Move to next bin
+            // Check if bin's output is fully consumed
+            if (binAmountOut >= reserveOut) {
+                binsCrossed++;
                 uint24 nextBin = _getNextNonEmptyBin(currentBinId, params.swapForY);
                 if (nextBin == currentBinId) break; // No more bins
                 currentBinId = nextBin;
@@ -340,6 +372,9 @@ contract LBPair is ILBPair {
                 break; // Swap complete within this bin
             }
         }
+
+        // Only pull the actually consumed input (return unconsumed to user)
+        uint256 actualAmountIn = params.amountIn - amountInRemaining;
 
         // Validate slippage
         if (totalAmountOut < params.minAmountOut) {
@@ -357,14 +392,12 @@ contract LBPair is ILBPair {
             activeId = currentBinId;
         }
 
-        // Execute token transfers
+        // Execute token transfers (only pull consumed amount)
         if (params.swapForY) {
-            // Swapping X for Y: receive X, send Y
-            _transferFrom(tokenX, msg.sender, address(this), params.amountIn);
+            _transferFrom(tokenX, msg.sender, address(this), actualAmountIn);
             _transfer(tokenY, params.to, totalAmountOut);
         } else {
-            // Swapping Y for X: receive Y, send X
-            _transferFrom(tokenY, msg.sender, address(this), params.amountIn);
+            _transferFrom(tokenY, msg.sender, address(this), actualAmountIn);
             _transfer(tokenX, params.to, totalAmountOut);
         }
 
@@ -379,7 +412,7 @@ contract LBPair is ILBPair {
             msg.sender,
             params.to,
             params.swapForY,
-            params.amountIn,
+            actualAmountIn,
             totalAmountOut,
             totalFees,
             currentBinId
@@ -397,7 +430,7 @@ contract LBPair is ILBPair {
      */
     function mint(
         LiquidityParameters calldata params
-    ) external override nonReentrant ensure(params.deadline) onlyCompliant(params.to) returns (uint256[] memory shares) {
+    ) external override nonReentrant ensure(params.deadline) returns (uint256[] memory shares) {
         if (params.binIds.length == 0) revert LBPair__InvalidLiquidityDistribution();
         if (params.binIds.length > MAX_BINS_PER_OPERATION) {
             revert LBPair__TooManyBins(params.binIds.length, MAX_BINS_PER_OPERATION);
@@ -465,7 +498,6 @@ contract LBPair is ILBPair {
         override
         nonReentrant
         ensure(params.deadline)
-        onlyCompliant(params.to)
         returns (uint256 amountX, uint256 amountY)
     {
         if (params.binIds.length == 0) revert LBPair__InvalidLiquidityDistribution();
@@ -544,14 +576,6 @@ contract LBPair is ILBPair {
     }
 
     /**
-     * @notice Set compliance module (only factory)
-     * @param _compliance Compliance module address (address(0) to disable)
-     */
-    function setCompliance(address _compliance) external onlyFactory {
-        compliance = _compliance;
-    }
-
-    /**
      * @notice Set oracle module (only factory)
      * @param _oracle Oracle module address (address(0) to disable)
      */
@@ -561,6 +585,8 @@ contract LBPair is ILBPair {
 
     /**
      * @notice Collect protocol fees (only factory)
+     * @dev Transfers accumulated protocol fees to the factory's fee recipient.
+     *      Called via LBFactory.collectProtocolFees() which enforces recipient access.
      * @return amountX Amount of token X protocol fees
      * @return amountY Amount of token Y protocol fees
      */
@@ -575,6 +601,14 @@ contract LBPair is ILBPair {
 
         protocolFeesX = 0;
         protocolFeesY = 0;
+
+        // Transfer fees to the caller (factory, which forwards to fee recipient)
+        if (amountX > 0) {
+            _transfer(tokenX, msg.sender, amountX);
+        }
+        if (amountY > 0) {
+            _transfer(tokenY, msg.sender, amountY);
+        }
 
         emit ProtocolFeesCollected(amountX, amountY);
     }

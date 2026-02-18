@@ -167,6 +167,16 @@ contract LBRouter {
         address pair = factory.getPair(tokenX, tokenY, binStep);
         if (pair == address(0)) revert LBRouter__PairNotFound();
 
+        // Pull tokens from user and approve pair
+        if (amountX > 0) {
+            _safeTransferFrom(tokenX, msg.sender, address(this), amountX);
+            _safeApprove(tokenX, pair, amountX);
+        }
+        if (amountY > 0) {
+            _safeTransferFrom(tokenY, msg.sender, address(this), amountY);
+            _safeApprove(tokenY, pair, amountY);
+        }
+
         // Generate uniform distribution
         (uint24[] memory binIds, uint64[] memory distX, uint64[] memory distY) =
             _generateUniformDistribution(activeBinId, binRange);
@@ -184,6 +194,10 @@ contract LBRouter {
         });
 
         shares = ILBPair(pair).mint(params);
+
+        // Reset approvals
+        if (amountX > 0) _safeApprove(tokenX, pair, 0);
+        if (amountY > 0) _safeApprove(tokenY, pair, 0);
     }
 
     /**
@@ -213,6 +227,16 @@ contract LBRouter {
         address pair = factory.getPair(tokenX, tokenY, binStep);
         if (pair == address(0)) revert LBRouter__PairNotFound();
 
+        // Pull tokens from user and approve pair
+        if (amountX > 0) {
+            _safeTransferFrom(tokenX, msg.sender, address(this), amountX);
+            _safeApprove(tokenX, pair, amountX);
+        }
+        if (amountY > 0) {
+            _safeTransferFrom(tokenY, msg.sender, address(this), amountY);
+            _safeApprove(tokenY, pair, amountY);
+        }
+
         // Single bin distribution
         uint24[] memory binIds = new uint24[](1);
         binIds[0] = binId;
@@ -236,6 +260,10 @@ contract LBRouter {
         });
 
         shares = ILBPair(pair).mint(params);
+
+        // Reset approvals
+        if (amountX > 0) _safeApprove(tokenX, pair, 0);
+        if (amountY > 0) _safeApprove(tokenY, pair, 0);
     }
 
     /**

@@ -40,7 +40,8 @@ contract OracleTest is Test {
         vm.warp(1_700_000_000);
 
         // Deploy core contracts
-        factory = new LBFactory(owner, owner);
+        LBPair implementation = new LBPair();
+        factory = new LBFactory(owner, owner, address(implementation));
         router = new LBRouter(address(factory));
 
         // Deploy oracle module

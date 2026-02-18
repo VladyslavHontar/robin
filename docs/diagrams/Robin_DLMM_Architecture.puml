@@ -30,7 +30,7 @@ skinparam arrow {
 
 skinparam linetype ortho
 
-title <size:18>Robin DLMM - Smart Contract Architecture</size>\n<size:10>Compliance-Enabled DEX for Tokenized Stocks on Robinhood Chain</size>
+title <size:18>Robin DLMM - Smart Contract Architecture</size>\n<size:10>Permissionless DEX · ERC-3643 tokens self-enforce compliance</size>
 
 ' =============================================================
 '  CALLERS
@@ -42,34 +42,24 @@ actor "Owner / Agent" as admin #FFCCBC
 '  LEVEL 1 — ENTRY
 ' =============================================================
 package "Level 1 — Entry (User-Facing)" #E3F2FD {
-    rectangle "LBFactory\n...\ncreatePair()\ngetPair()\nsetFeeParameters()\nsetComplianceModule()\nsetOracleModule()\nsetPairOracle()\ntransferOwnership()" as factory #BBDEFB
+    rectangle "LBFactory\n...\ncreatePair()\ngetPair()\nsetFeeParameters()\nsetOracleModule()\nsetPairOracle()\ntransferOwnership()" as factory #BBDEFB
 
     rectangle "LBRouter\n...\nswapExactTokensForTokens()\naddLiquidity()\nremoveLiquidity()\ngetSwapQuote()\ngetActiveBinFromOracle()\ngetOracleDeviation()" as router #BBDEFB
 }
 
 ' =============================================================
-'  LEVEL 2 — CORE ENGINE
+'  LEVEL 2 — CORE ENGINE  (no compliance here — DEX is permissionless)
 ' =============================================================
-package "Level 2 — Core Engine" #E8F5E9 {
-    rectangle "ComplianceModule\n...\ncanTransfer()\nisVerified()\nsetCountryAllowed()\nsetTransferLimits()" as compliance #FFF176
-
-    rectangle "LBPair  (1 per token pair)\n...\nswap()  /  mint()  /  burn()\ncollectFees()  /  balanceOf()\ngetBinReserves()  /  getSwapOut()\nsetCompliance()  /  setOracle()" as pair #A5D6A7
+package "Level 2 — Core Engine (Permissionless)" #E8F5E9 {
+    rectangle "LBPair  (1 per token pair)\n...\nswap()  /  mint()  /  burn()\ncollectFees()  /  balanceOf()\ngetBinReserves()  /  getSwapOut()\nsetOracle()" as pair #A5D6A7
 
     rectangle "OracleModule\n...\ngetOracleBinId()\ngetDeviationFee()\ngetOraclePrice()\nsetPriceFeed()\nsetDeviationParams()" as oracle #FFCC80
 }
 
 ' =============================================================
-'  LEVEL 3 — SUPPORT (three columns)
+'  LEVEL 3 — SUPPORT
 ' =============================================================
-package "Level 3 — Identity (ERC-3643)" #FFF9C4 {
-    rectangle "IdentityRegistry\n...\nisVerified()\nregisterIdentity()\ndeleteIdentity()\ninvestorCountry()" as registry #FFF176
-
-    rectangle "Identity (OnchainID)\n...\naddClaim()\ngetClaim()\ngetClaimIdsByTopic()" as identity #FFF176
-
-    rectangle "ClaimIssuer\n...\nisClaimValid()\nrevokeClaim()" as issuer #FFF176
-}
-
-package "Level 3 — Libraries (Stateless)" #F3E5F5 {
+package "Level 3 — Libraries & External" #F3E5F5 {
     rectangle "BinMath\n...\ngetPriceFromId()\ngetIdFromPrice()" as binMath #E1BEE7
 
     rectangle "SwapHelper\n...\ngetAmountOutSingleBin()\nupdateBinReserves()" as swapHelper #E1BEE7
@@ -77,12 +67,26 @@ package "Level 3 — Libraries (Stateless)" #F3E5F5 {
     rectangle "BitMath\n...\nclosestBitRight()\nsetBit() / clearBit()" as bitMath #E1BEE7
 
     rectangle "FeeHelper\n...\ngetTotalFee()\ngetOracleDeviationFee()\napplyTimeAdjustment()" as feeHelper #E1BEE7
-}
-
-package "Level 3 — External (On-Chain)" #FFF8E1 {
-    rectangle "ERC-20 Tokens\n...\ntokenX / tokenY\ntransferFrom()\ntransfer()" as tokens #FFE082
 
     rectangle "Chainlink Oracle\n...\nlatestRoundData()\ndecimals()\nstock price feeds" as chainlink #FFE082
+}
+
+package "Level 3 — ERC-3643 Token Stack" #FFF8E1 {
+    note as erc3643note
+        ERC-3643 is ERC-20 compatible.
+        DEX calls transferFrom() on any token.
+        Compliance is internal to the token — DEX is oblivious.
+    end note
+
+    rectangle "Token  (ERC-3643 ⊇ ERC-20)\n...\ntransfer()\ntransferFrom()  ← compliance hook here\nsetComplianceModule()\nforcedTransfer()  /  freeze()" as token #FFCA28
+
+    rectangle "ComplianceModule\n...\ncompliesWithTransfer()\nsetWhitelisted()\nsetCountryAllowed()\nsetTransferLimits()" as compliance #FFF176
+
+    rectangle "IdentityRegistry\n...\nisVerified()\nregisterIdentity()\ndeleteIdentity()\ninvestorCountry()" as registry #FFF176
+
+    rectangle "Identity (OnchainID)\n...\naddClaim()\ngetClaim()\ngetClaimIdsByTopic()" as identity #FFF176
+
+    rectangle "ClaimIssuer\n...\nisClaimValid()\nrevokeClaim()" as issuer #FFF176
 }
 
 ' =============================================================
@@ -91,9 +95,9 @@ package "Level 3 — External (On-Chain)" #FFF8E1 {
 package "Level 4 — Shared Types & Interfaces" #ECEFF1 {
     rectangle "ILBPairTypes\n...\nBinState, FeeParameters,\nOracleDeviationParams,\nSwapParameters, SwapResult,\nLiquidityParameters" as types #CFD8DC
 
-    rectangle "Interfaces\n...\nILBPair, ILBFactory,\nIOracleModule,\nIComplianceModule,\nIIdentityRegistry, IIdentity" as ifaces #CFD8DC
+    rectangle "Interfaces\n...\nILBPair, ILBFactory,\nIOracleModule, IERC20,\nIComplianceModule,\nIIdentityRegistry, IIdentity" as ifaces #CFD8DC
 
-    rectangle "ILBPairErrors / Events\n...\n25 custom errors\n9 events" as errEvt #CFD8DC
+    rectangle "ILBPairErrors / Events\n...\n20 custom errors\n9 events" as errEvt #CFD8DC
 }
 
 ' =============================================================
@@ -110,7 +114,6 @@ factory -right-> router : "  "
 ' =============================================================
 '  CONNECTIONS — Level 1 → Level 2
 ' =============================================================
-factory -down-> compliance : "configure"
 factory -down-> pair : "creates"
 factory -down-> oracle : "configure"
 router -down-> pair : "swap() / mint() / burn()"
@@ -119,22 +122,22 @@ router -down-> oracle : "getOracleBinId()"
 ' =============================================================
 '  CONNECTIONS — Level 2 internal
 ' =============================================================
-pair -left-> compliance : "canTransfer()"
 pair -right-> oracle : "getDeviationFee()"
 
 ' =============================================================
 '  CONNECTIONS — Level 2 → Level 3
 ' =============================================================
-compliance -down-> registry : "isVerified()"
 oracle -down-> chainlink : "latestRoundData()"
 oracle -down-> binMath : "getIdFromPrice()"
 pair -down-> binMath
 pair -down-> swapHelper
-pair -down-> tokens : "transfer()"
+pair -down-> token : "transferFrom()  (ERC-20 interface)\nworks for plain ERC-20 and ERC-3643"
 
 ' =============================================================
-'  CONNECTIONS — Level 3 internal
+'  CONNECTIONS — ERC-3643 internal chain (inside the token stack)
 ' =============================================================
+token -down-> compliance : "compliesWithTransfer()\n(on every transfer)"
+compliance -down-> registry : "isVerified()"
 registry -down-> identity : "getClaim()"
 identity -down-> issuer : "isClaimValid()"
 
@@ -145,15 +148,15 @@ swapHelper -down-> types : "uses"
 feeHelper -down-> types : "uses"
 
 ' =============================================================
-'  LAYOUT — Force three-column structure at Level 3
+'  LAYOUT — Two columns at Level 3
+'  Left: Libraries | Right: ERC-3643 Token Stack
 ' =============================================================
-registry -[hidden]right- binMath
-identity -[hidden]right- swapHelper
-issuer -[hidden]right- bitMath
-binMath -[hidden]right- bitMath
-swapHelper -[hidden]right- feeHelper
-bitMath -[hidden]right- tokens
-feeHelper -[hidden]right- chainlink
+binMath   -[hidden]right- token
+swapHelper -[hidden]right- compliance
+bitMath   -[hidden]right- registry
+feeHelper -[hidden]right- identity
+
+' Level 4 columns
 types -[hidden]right- ifaces
 ifaces -[hidden]right- errEvt
 
