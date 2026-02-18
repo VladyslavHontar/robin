@@ -7,6 +7,7 @@ import "../src/LBPair.sol";
 import "../src/LBRouter.sol";
 import "../src/mocks/MockERC20.sol";
 import "../src/interfaces/ILBPairTypes.sol";
+import {TransparentUpgradeableProxy} from "openzeppelin-contracts/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 
 /**
  * @title Integration Test
@@ -26,10 +27,20 @@ contract IntegrationTest is Test {
     uint16 constant BIN_STEP = 50; // 0.5%
 
     function setUp() public {
-        // Deploy contracts
+        // Deploy implementations
         LBPair implementation = new LBPair();
-        factory = new LBFactory(address(this), address(this), address(implementation));
-        router = new LBRouter(address(factory));
+        LBFactory factoryImpl = new LBFactory();
+        LBRouter routerImpl = new LBRouter();
+
+        // Deploy proxies (matches production deployment)
+        factory = LBFactory(address(new TransparentUpgradeableProxy(
+            address(factoryImpl), address(this),
+            abi.encodeCall(LBFactory.initialize, (address(this), address(this), address(implementation)))
+        )));
+        router = LBRouter(address(new TransparentUpgradeableProxy(
+            address(routerImpl), address(this),
+            abi.encodeCall(LBRouter.initialize, (address(factory)))
+        )));
 
         // Deploy tokens
         tokenX = new MockERC20("Token X", "X", 18);

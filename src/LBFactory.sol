@@ -7,6 +7,7 @@ import {ILBPair} from "./interfaces/ILBPair.sol";
 import {LBPair} from "./LBPair.sol";
 import {UpgradeableBeacon} from "openzeppelin-contracts/contracts/proxy/beacon/UpgradeableBeacon.sol";
 import {BeaconProxy} from "openzeppelin-contracts/contracts/proxy/beacon/BeaconProxy.sol";
+import {Initializable} from "openzeppelin-contracts/contracts/proxy/utils/Initializable.sol";
 
 /**
  * @title LBFactory
@@ -18,7 +19,7 @@ import {BeaconProxy} from "openzeppelin-contracts/contracts/proxy/beacon/BeaconP
  * - Standard: 50 bp (0.5%) - Mid-cap stocks
  * - Wide: 100 bp (1%) - Small-cap/volatile stocks
  */
-contract LBFactory is ILBFactory {
+contract LBFactory is ILBFactory, Initializable {
     // =============================================================
     //                          STORAGE
     // =============================================================
@@ -49,17 +50,29 @@ contract LBFactory is ILBFactory {
     uint16 public constant BIN_STEP_STANDARD = 50; // 0.5%
     uint16 public constant BIN_STEP_WIDE = 100; // 1%
 
+    /// @notice Storage gap for future upgrades
+    uint256[50] private __gap;
+
     // =============================================================
-    //                        CONSTRUCTOR
+    //                    CONSTRUCTOR / INITIALIZER
     // =============================================================
 
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
     /**
-     * @notice Initialize the factory
+     * @notice Initialize the factory (called once through proxy)
      * @param _owner Initial owner address
      * @param _protocolFeeRecipient Initial protocol fee recipient
      * @param _implementation LBPair implementation contract address
      */
-    constructor(address _owner, address _protocolFeeRecipient, address _implementation) {
+    function initialize(
+        address _owner,
+        address _protocolFeeRecipient,
+        address _implementation
+    ) external initializer {
         if (_owner == address(0) || _protocolFeeRecipient == address(0) || _implementation == address(0)) {
             revert LBFactory__ZeroAddress();
         }
@@ -68,7 +81,7 @@ contract LBFactory is ILBFactory {
         protocolFeeRecipient = _protocolFeeRecipient;
 
         // Deploy beacon — all pair proxies will point here.
-        // The owner of the beacon is this factory; upgrade via upgradePairImplementation().
+        // The owner of the beacon is this factory (the proxy); upgrade via upgradePairImplementation().
         beacon = new UpgradeableBeacon(_implementation, address(this));
 
         // Enable supported bin steps

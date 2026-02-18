@@ -12,6 +12,7 @@ import "../src/interfaces/ILBPairTypes.sol";
 import "../src/interfaces/IOracleModule.sol";
 import "../src/libraries/BinMath.sol";
 import "../src/libraries/FeeHelper.sol";
+import {TransparentUpgradeableProxy} from "openzeppelin-contracts/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 
 /**
  * @title Oracle Test
@@ -39,13 +40,24 @@ contract OracleTest is Test {
         // Set reasonable timestamp (Foundry default is 1)
         vm.warp(1_700_000_000);
 
-        // Deploy core contracts
+        // Deploy core contracts via proxies
         LBPair implementation = new LBPair();
-        factory = new LBFactory(owner, owner, address(implementation));
-        router = new LBRouter(address(factory));
+        LBFactory factoryImpl = new LBFactory();
+        LBRouter routerImpl = new LBRouter();
+        OracleModule oracleImpl = new OracleModule();
 
-        // Deploy oracle module
-        oracleModule = new OracleModule(owner);
+        factory = LBFactory(address(new TransparentUpgradeableProxy(
+            address(factoryImpl), owner,
+            abi.encodeCall(LBFactory.initialize, (owner, owner, address(implementation)))
+        )));
+        router = LBRouter(address(new TransparentUpgradeableProxy(
+            address(routerImpl), owner,
+            abi.encodeCall(LBRouter.initialize, (address(factory)))
+        )));
+        oracleModule = OracleModule(address(new TransparentUpgradeableProxy(
+            address(oracleImpl), owner,
+            abi.encodeCall(OracleModule.initialize, (owner))
+        )));
 
         // Set oracle on factory
         factory.setOracleModule(address(oracleModule));
@@ -107,8 +119,12 @@ contract OracleTest is Test {
     }
 
     function testSetPairOracleDirectly() public {
-        // Deploy another oracle
-        OracleModule oracle2 = new OracleModule(owner);
+        // Deploy another oracle via proxy
+        OracleModule oracle2Impl = new OracleModule();
+        OracleModule oracle2 = OracleModule(address(new TransparentUpgradeableProxy(
+            address(oracle2Impl), owner,
+            abi.encodeCall(OracleModule.initialize, (owner))
+        )));
         factory.setPairOracle(address(pair), address(oracle2));
         assertEq(pair.oracle(), address(oracle2));
     }

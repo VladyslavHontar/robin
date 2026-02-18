@@ -5,6 +5,7 @@ import {ILBFactory} from "./interfaces/ILBFactory.sol";
 import {ILBPair} from "./interfaces/ILBPair.sol";
 import {ILBPairTypes} from "./interfaces/ILBPairTypes.sol";
 import {IOracleModule} from "./interfaces/IOracleModule.sol";
+import {Initializable} from "openzeppelin-contracts/contracts/proxy/utils/Initializable.sol";
 
 /**
  * @title LBRouter
@@ -17,7 +18,7 @@ import {IOracleModule} from "./interfaces/IOracleModule.sol";
  * - Multi-hop swap support
  * - Deadline enforcement on all operations
  */
-contract LBRouter {
+contract LBRouter is Initializable {
     // =============================================================
     //                          ERRORS
     // =============================================================
@@ -36,18 +37,26 @@ contract LBRouter {
     //                          STORAGE
     // =============================================================
 
-    /// @notice Factory address
-    ILBFactory public immutable factory;
+    /// @notice Factory address (non-immutable for proxy compatibility)
+    ILBFactory public factory;
+
+    /// @notice Storage gap for future upgrades
+    uint256[50] private __gap;
 
     // =============================================================
-    //                        CONSTRUCTOR
+    //                    CONSTRUCTOR / INITIALIZER
     // =============================================================
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
 
     /**
-     * @notice Initialize router
+     * @notice Initialize router (called once through proxy)
      * @param _factory Factory address
      */
-    constructor(address _factory) {
+    function initialize(address _factory) external initializer {
         if (_factory == address(0)) revert LBRouter__ZeroAddress();
         factory = ILBFactory(_factory);
     }

@@ -6,6 +6,7 @@ import {ILBPairTypes} from "./interfaces/ILBPairTypes.sol";
 import {ILBPair} from "./interfaces/ILBPair.sol";
 import {BinMath} from "./libraries/BinMath.sol";
 import {FeeHelper} from "./libraries/FeeHelper.sol";
+import {Initializable} from "openzeppelin-contracts/contracts/proxy/utils/Initializable.sol";
 
 /**
  * @title OracleModule
@@ -18,7 +19,7 @@ import {FeeHelper} from "./libraries/FeeHelper.sol";
  * 1. LP convenience — getOracleBinId() converts Chainlink price to bin ID
  * 2. Fee adjustment — getDeviationFee() adds extra fee when DEX diverges from oracle
  */
-contract OracleModule is IOracleModule {
+contract OracleModule is IOracleModule, Initializable {
     // =============================================================
     //                          STORAGE
     // =============================================================
@@ -42,11 +43,23 @@ contract OracleModule is IOracleModule {
     /// @notice Whether deviation params have been explicitly set for a pair
     mapping(address => bool) private _hasCustomDeviationParams;
 
+    /// @notice Storage gap for future upgrades
+    uint256[50] private __gap;
+
     // =============================================================
-    //                        CONSTRUCTOR
+    //                    CONSTRUCTOR / INITIALIZER
     // =============================================================
 
-    constructor(address _owner) {
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    /**
+     * @notice Initialize the oracle module (called once through proxy)
+     * @param _owner Contract owner
+     */
+    function initialize(address _owner) external initializer {
         if (_owner == address(0)) revert OracleModule__ZeroAddress();
         owner = _owner;
     }

@@ -12,6 +12,7 @@ import {Identity} from "../src/compliance/Identity.sol";
 import {ClaimIssuer} from "../src/compliance/ClaimIssuer.sol";
 import {IdentityRegistry} from "../src/compliance/IdentityRegistry.sol";
 import {ComplianceModule} from "../src/compliance/ComplianceModule.sol";
+import {TransparentUpgradeableProxy} from "openzeppelin-contracts/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 
 /**
  * @title ComplianceTest
@@ -78,8 +79,17 @@ contract ComplianceTest is Test {
 
         // Deploy DEX (no compliance module set — DEX is permissionless)
         LBPair implementation = new LBPair();
-        factory = new LBFactory(owner, owner, address(implementation));
-        router = new LBRouter(address(factory));
+        LBFactory factoryImpl = new LBFactory();
+        LBRouter routerImpl = new LBRouter();
+
+        factory = LBFactory(address(new TransparentUpgradeableProxy(
+            address(factoryImpl), owner,
+            abi.encodeCall(LBFactory.initialize, (owner, owner, address(implementation)))
+        )));
+        router = LBRouter(address(new TransparentUpgradeableProxy(
+            address(routerImpl), owner,
+            abi.encodeCall(LBRouter.initialize, (address(factory)))
+        )));
 
         // Deploy tokens
         amzn = new RWAToken("Amazon Stock Token", "AMZN", 18, owner);
