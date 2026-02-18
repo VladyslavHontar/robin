@@ -257,7 +257,15 @@ contract LBPair is ILBPair, Initializable {
         while (amountInRemaining > 0 && binsCrossed < SwapHelper.MAX_BINS_PER_SWAP) {
             BinState memory bin = _getBinState(currentBinId);
             uint256 reserveOut = swapForY ? uint256(bin.reserveY) : uint256(bin.reserveX);
-            if (reserveOut == 0) break;
+
+            // Skip bins with no output reserves (find next bin that has liquidity)
+            if (reserveOut == 0) {
+                uint24 nextBin = _getNextNonEmptyBin(currentBinId, swapForY);
+                if (nextBin == currentBinId) break;
+                binsCrossed++;
+                currentBinId = nextBin;
+                continue;
+            }
 
             uint256 feeBps = FeeHelper.getTotalFee(feeParameters, startBinId, currentBinId, oracleDeviationFeeBps);
 
@@ -318,7 +326,15 @@ contract LBPair is ILBPair, Initializable {
 
             // Get output reserve for this bin
             uint256 reserveOut = params.swapForY ? uint256(bin.reserveY) : uint256(bin.reserveX);
-            if (reserveOut == 0) break;
+
+            // Skip bins with no output reserves (find next bin that has liquidity)
+            if (reserveOut == 0) {
+                uint24 nextBin = _getNextNonEmptyBin(currentBinId, params.swapForY);
+                if (nextBin == currentBinId) break;
+                binsCrossed++;
+                currentBinId = nextBin;
+                continue;
+            }
 
             // Calculate fee for this bin (includes oracle deviation)
             uint256 feeBps = FeeHelper.getTotalFee(feeParameters, startBinId, currentBinId, oracleDeviationFeeBps);
@@ -651,23 +667,74 @@ contract LBPair is ILBPair, Initializable {
         uint16 l1Index = uint16(binId >> 8);
         uint8 l2Offset = uint8(binId);
 
-        // Load L2 bitmap
+        // Load L2 bitmap for current bucket
         uint256 l2Bitmap = _binBitmapL2[l1Index];
 
         if (swapForY) {
-            // Search right (higher bins)
-            (uint8 bit, bool found) = l2Bitmap.closestBitRight(l2Offset, false);
-            if (found) {
-                return (uint24(l1Index) << 8) | uint24(bit);
-            }
-            // TODO: Search L1 for next non-empty L2 bucket
-        } else {
-            // Search left (lower bins)
+            // Search left (lower bins) — lower bins have more tokenY
             (uint8 bit, bool found) = l2Bitmap.closestBitLeft(l2Offset, false);
             if (found) {
                 return (uint24(l1Index) << 8) | uint24(bit);
             }
-            // TODO: Search L1 for previous non-empty L2 bucket
+
+            // Cross L2 boundary: search L1 for previous non-empty L2 bucket
+            uint16 l1Group = l1Index >> 8;
+            uint8 l1Offset = uint8(l1Index);
+            uint256 l1Bitmap = _binBitmapL1[l1Group];
+
+            // Search for previous L1 bit (lower L2 bucket) within current group
+            (uint8 l1Bit, bool l1Found) = l1Bitmap.closestBitLeft(l1Offset, false);
+            if (l1Found) {
+                uint16 newL1Index = (l1Group << 8) | uint16(l1Bit);
+                uint256 newL2Bitmap = _binBitmapL2[newL1Index];
+                uint8 msb = uint8(BitMath.mostSignificantBit(newL2Bitmap));
+                return (uint24(newL1Index) << 8) | uint24(msb);
+            }
+
+            // Cross L1 group boundary: search lower L1 groups
+            for (uint16 g = l1Group; g > 0;) {
+                g--;
+                uint256 adjL1 = _binBitmapL1[g];
+                if (adjL1 != 0) {
+                    uint8 topL1 = uint8(BitMath.mostSignificantBit(adjL1));
+                    uint16 newL1Index = (g << 8) | uint16(topL1);
+                    uint256 newL2Bitmap = _binBitmapL2[newL1Index];
+                    uint8 msb = uint8(BitMath.mostSignificantBit(newL2Bitmap));
+                    return (uint24(newL1Index) << 8) | uint24(msb);
+                }
+            }
+        } else {
+            // Search right (higher bins) — higher bins have more tokenX
+            (uint8 bit, bool found) = l2Bitmap.closestBitRight(l2Offset, false);
+            if (found) {
+                return (uint24(l1Index) << 8) | uint24(bit);
+            }
+
+            // Cross L2 boundary: search L1 for next non-empty L2 bucket
+            uint16 l1Group = l1Index >> 8;
+            uint8 l1Offset = uint8(l1Index);
+            uint256 l1Bitmap = _binBitmapL1[l1Group];
+
+            // Search for next L1 bit (higher L2 bucket) within current group
+            (uint8 l1Bit, bool l1Found) = l1Bitmap.closestBitRight(l1Offset, false);
+            if (l1Found) {
+                uint16 newL1Index = (l1Group << 8) | uint16(l1Bit);
+                uint256 newL2Bitmap = _binBitmapL2[newL1Index];
+                uint8 lsb = uint8(BitMath.leastSignificantBit(newL2Bitmap));
+                return (uint24(newL1Index) << 8) | uint24(lsb);
+            }
+
+            // Cross L1 group boundary: search higher L1 groups
+            for (uint16 g = l1Group + 1; g < 256; g++) {
+                uint256 adjL1 = _binBitmapL1[g];
+                if (adjL1 != 0) {
+                    uint8 botL1 = uint8(BitMath.leastSignificantBit(adjL1));
+                    uint16 newL1Index = (g << 8) | uint16(botL1);
+                    uint256 newL2Bitmap = _binBitmapL2[newL1Index];
+                    uint8 lsb = uint8(BitMath.leastSignificantBit(newL2Bitmap));
+                    return (uint24(newL1Index) << 8) | uint24(lsb);
+                }
+            }
         }
 
         return binId; // No other bins found

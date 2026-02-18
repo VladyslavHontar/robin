@@ -122,6 +122,67 @@ contract LBRouter is Initializable {
     }
 
     /**
+     * @notice Swap exact tokens on a specific pair (bypasses factory lookup)
+     * @dev Used when the UI already knows the pair address (e.g., user navigated to a pool).
+     *      Validates that the pair is a legitimate LBPair by checking tokenX/tokenY match.
+     * @param pair The LBPair contract address
+     * @param tokenIn Input token address
+     * @param tokenOut Output token address
+     * @param amountIn Amount of input tokens
+     * @param minAmountOut Minimum output tokens (slippage protection)
+     * @param to Recipient address
+     * @param deadline Transaction deadline
+     * @return amountOut Amount of output tokens received
+     */
+    function swapOnPair(
+        address pair,
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 minAmountOut,
+        address to,
+        uint256 deadline
+    ) external returns (uint256 amountOut) {
+        _checkDeadline(deadline);
+        if (pair == address(0)) revert LBRouter__PairNotFound();
+
+        // Validate the pair has the expected tokens (prevents use with arbitrary contracts)
+        address pairTokenX = ILBPair(pair).tokenX();
+        address pairTokenY = ILBPair(pair).tokenY();
+        bool validTokens = (tokenIn == pairTokenX && tokenOut == pairTokenY)
+                        || (tokenIn == pairTokenY && tokenOut == pairTokenX);
+        if (!validTokens) revert LBRouter__InvalidPath();
+
+        // Transfer tokens from user to router
+        _safeTransferFrom(tokenIn, msg.sender, address(this), amountIn);
+
+        // Approve pair to spend router's tokens
+        _safeApprove(tokenIn, pair, amountIn);
+
+        // Determine swap direction
+        bool swapForY = tokenIn < tokenOut;
+
+        // Execute swap
+        ILBPairTypes.SwapParameters memory params = ILBPairTypes.SwapParameters({
+            swapForY: swapForY,
+            amountIn: amountIn,
+            minAmountOut: minAmountOut,
+            deadline: deadline,
+            to: to
+        });
+
+        ILBPairTypes.SwapResult memory result = ILBPair(pair).swap(params);
+        amountOut = result.amountOut;
+
+        // Reset approval
+        _safeApprove(tokenIn, pair, 0);
+
+        if (amountOut < minAmountOut) {
+            revert LBRouter__InsufficientAmountOut();
+        }
+    }
+
+    /**
      * @notice Get quote for swap (view function)
      * @param tokenIn Input token
      * @param tokenOut Output token
