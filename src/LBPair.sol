@@ -37,6 +37,9 @@ contract LBPair is ILBPair, Initializable {
     /// @notice Maximum price move allowed in single swap (circuit breaker)
     uint24 private constant MAX_PRICE_MOVE_BINS = 200; // 20% at 10bp step
 
+    /// @notice Precision for fee growth per share calculations
+    uint256 private constant FEE_PRECISION = 1e18;
+
     /// @notice Reentrancy guard value
     uint256 private constant NOT_ENTERED = 1;
     uint256 private constant ENTERED = 2;
@@ -94,8 +97,12 @@ contract LBPair is ILBPair, Initializable {
     /// @notice Next liquidity index to use
     uint32 private _nextLiquidityIndex;
 
+    /// @notice Per-LP fee debt: account => binId => packed(debtX: uint128, debtY: uint128)
+    /// @dev Pending fees = (shares * feeGrowth / FEE_PRECISION) - debt
+    mapping(address => mapping(uint24 => uint256)) private _feeDebts;
+
     /// @notice Storage gap for future upgrades (beacon proxy pattern)
-    uint256[50] private __gap;
+    uint256[49] private __gap;
 
     // =============================================================
     //                         MODIFIERS
@@ -290,14 +297,45 @@ contract LBPair is ILBPair, Initializable {
         }
     }
 
+    /**
+     * @notice Get unclaimed fees for an account across specified bins
+     * @param account User address
+     * @param binIds Array of bin IDs to check
+     * @return amountX Total unclaimed token X fees
+     * @return amountY Total unclaimed token Y fees
+     */
+    function getUnclaimedFees(
+        address account,
+        uint24[] calldata binIds
+    ) external view returns (uint256 amountX, uint256 amountY) {
+        for (uint256 i = 0; i < binIds.length; i++) {
+            uint24 binId = binIds[i];
+            uint256 shares = _balances[account][binId];
+            if (shares == 0) continue;
+
+            BinState memory bin = _getBinState(binId);
+            if (bin.liquidityIndex == 0) continue;
+
+            LiquidityData storage liquidity = _liquidityData[bin.liquidityIndex];
+            (uint128 debtX, uint128 debtY) = _unpackFeeDebts(_feeDebts[account][binId]);
+
+            (uint256 pendingX, uint256 pendingY) = _calculatePendingFees(
+                shares, liquidity.feeGrowthX, liquidity.feeGrowthY, debtX, debtY
+            );
+
+            amountX += pendingX;
+            amountY += pendingY;
+        }
+    }
+
     // =============================================================
     //                       SWAP FUNCTIONS
     // =============================================================
 
     /**
      * @notice Execute a swap
-     * @dev Fee-on-input: fee is taken from the input amount. LP share of fee auto-compounds
-     *      into bin reserves (input token side). Protocol share is tracked separately.
+     * @dev Fee-on-input: fee is taken from the input amount. LP fees tracked via
+     *      feeGrowthPerShare accumulator. Protocol share is tracked separately.
      * @param params Swap parameters
      * @return result Swap result with output amount and fees
      */
@@ -359,17 +397,31 @@ contract LBPair is ILBPair, Initializable {
             totalFees += binFee;
             amountInRemaining -= totalConsumed;
 
-            // Update bin reserves:
-            // Input reserve += effectiveInput + lpFee (LP fee auto-compounds as input token)
-            // Output reserve -= binAmountOut
+            // Update bin reserves (principal only, fees tracked separately)
             if (params.swapForY) {
-                bin.reserveX += uint112(effectiveInput + lpFee);
+                bin.reserveX += uint112(effectiveInput);
                 bin.reserveY -= uint112(binAmountOut);
             } else {
-                bin.reserveY += uint112(effectiveInput + lpFee);
+                bin.reserveY += uint112(effectiveInput);
                 bin.reserveX -= uint112(binAmountOut);
             }
             _setBinState(currentBinId, bin);
+
+            // Accumulate LP fee into feeGrowthPerShare (fee tokens stay in contract)
+            if (lpFee > 0 && bin.liquidityIndex != 0) {
+                LiquidityData storage liquidity = _liquidityData[bin.liquidityIndex];
+                if (liquidity.totalShares > 0) {
+                    if (params.swapForY) {
+                        liquidity.feeGrowthX = FeeHelper.accumulateFees(
+                            liquidity.feeGrowthX, lpFee, liquidity.totalShares
+                        );
+                    } else {
+                        liquidity.feeGrowthY = FeeHelper.accumulateFees(
+                            liquidity.feeGrowthY, lpFee, liquidity.totalShares
+                        );
+                    }
+                }
+            }
 
             // Track protocol fees (denominated in input token)
             if (params.swapForY) {
@@ -569,9 +621,18 @@ contract LBPair is ILBPair, Initializable {
     function collectFees(
         uint24[] calldata binIds,
         address account
-    ) external override returns (uint256 amountX, uint256 amountY) {
-        // Fee collection logic (simplified for now - fees auto-compound)
-        // In future: track fee growth per share and calculate accrued fees
+    ) external override nonReentrant returns (uint256 amountX, uint256 amountY) {
+        if (msg.sender != account) revert LBPair__Unauthorized(msg.sender);
+
+        for (uint256 i = 0; i < binIds.length; i++) {
+            (uint256 pendingX, uint256 pendingY) = _collectFeesForBin(account, binIds[i]);
+            amountX += pendingX;
+            amountY += pendingY;
+        }
+
+        if (amountX > 0) _transfer(tokenX, account, amountX);
+        if (amountY > 0) _transfer(tokenY, account, amountY);
+
         emit FeesCollected(msg.sender, account, amountX, amountY);
     }
 
@@ -787,6 +848,20 @@ contract LBPair is ILBPair, Initializable {
             }
         }
 
+        // Collect pending fees if user has existing position in this bin
+        uint256 existingShares = _balances[to][binId];
+        if (existingShares > 0) {
+            (uint128 debtX, uint128 debtY) = _unpackFeeDebts(_feeDebts[to][binId]);
+            (uint256 pendingFeesX, uint256 pendingFeesY) = _calculatePendingFees(
+                existingShares, liquidity.feeGrowthX, liquidity.feeGrowthY, debtX, debtY
+            );
+            if (pendingFeesX > 0) _transfer(tokenX, to, pendingFeesX);
+            if (pendingFeesY > 0) _transfer(tokenY, to, pendingFeesY);
+            if (pendingFeesX > 0 || pendingFeesY > 0) {
+                emit FeesCollected(to, to, pendingFeesX, pendingFeesY);
+            }
+        }
+
         // Update bin reserves
         bin.reserveX += uint112(amountX);
         bin.reserveY += uint112(amountY);
@@ -797,6 +872,9 @@ contract LBPair is ILBPair, Initializable {
 
         // Update user balance
         _balances[to][binId] += shares;
+
+        // Snapshot fee debt at current feeGrowth for new total shares
+        _updateFeeDebt(to, binId, _balances[to][binId], liquidity.feeGrowthX, liquidity.feeGrowthY);
     }
 
     /**
@@ -820,6 +898,20 @@ contract LBPair is ILBPair, Initializable {
         BinState memory bin = _getBinState(binId);
         LiquidityData storage liquidity = _liquidityData[bin.liquidityIndex];
 
+        // Auto-collect pending fees before burning
+        {
+            (uint128 debtX, uint128 debtY) = _unpackFeeDebts(_feeDebts[from][binId]);
+            uint256 currentShares = _balances[from][binId];
+            (uint256 pendingFeesX, uint256 pendingFeesY) = _calculatePendingFees(
+                currentShares, liquidity.feeGrowthX, liquidity.feeGrowthY, debtX, debtY
+            );
+            if (pendingFeesX > 0) _transfer(tokenX, from, pendingFeesX);
+            if (pendingFeesY > 0) _transfer(tokenY, from, pendingFeesY);
+            if (pendingFeesX > 0 || pendingFeesY > 0) {
+                emit FeesCollected(from, from, pendingFeesX, pendingFeesY);
+            }
+        }
+
         // Calculate amounts proportional to shares
         amountX = (shares * uint256(bin.reserveX)) / liquidity.totalShares;
         amountY = (shares * uint256(bin.reserveY)) / liquidity.totalShares;
@@ -833,6 +925,14 @@ contract LBPair is ILBPair, Initializable {
 
         // Update user balance
         _balances[from][binId] -= shares;
+
+        // Update fee debt for remaining shares (or clear if fully exited)
+        uint256 remainingShares = _balances[from][binId];
+        if (remainingShares > 0) {
+            _updateFeeDebt(from, binId, remainingShares, liquidity.feeGrowthX, liquidity.feeGrowthY);
+        } else {
+            _feeDebts[from][binId] = 0;
+        }
 
         // If bin empty, clear bitmap
         if (liquidity.totalShares == 0) {
@@ -878,6 +978,70 @@ contract LBPair is ILBPair, Initializable {
         while (z < y) {
             y = z;
             z = (x / z + z) / 2;
+        }
+    }
+
+    // =============================================================
+    //                   FEE DEBT HELPERS
+    // =============================================================
+
+    /// @notice Pack two uint128 fee debts into a single uint256
+    function _packFeeDebts(uint128 debtX, uint128 debtY) internal pure returns (uint256) {
+        return uint256(debtX) | (uint256(debtY) << 128);
+    }
+
+    /// @notice Unpack a uint256 into two uint128 fee debts
+    function _unpackFeeDebts(uint256 packed) internal pure returns (uint128 debtX, uint128 debtY) {
+        debtX = uint128(packed);
+        debtY = uint128(packed >> 128);
+    }
+
+    /// @notice Calculate pending unclaimed fees for a position
+    function _calculatePendingFees(
+        uint256 shares,
+        uint128 feeGrowthX,
+        uint128 feeGrowthY,
+        uint128 debtX,
+        uint128 debtY
+    ) internal pure returns (uint256 pendingX, uint256 pendingY) {
+        if (shares == 0) return (0, 0);
+        pendingX = (shares * uint256(feeGrowthX)) / FEE_PRECISION - uint256(debtX);
+        pendingY = (shares * uint256(feeGrowthY)) / FEE_PRECISION - uint256(debtY);
+    }
+
+    /// @notice Update fee debt snapshot for a user after shares change
+    function _updateFeeDebt(
+        address account,
+        uint24 binId,
+        uint256 newShares,
+        uint128 feeGrowthX,
+        uint128 feeGrowthY
+    ) internal {
+        uint128 newDebtX = uint128((newShares * uint256(feeGrowthX)) / FEE_PRECISION);
+        uint128 newDebtY = uint128((newShares * uint256(feeGrowthY)) / FEE_PRECISION);
+        _feeDebts[account][binId] = _packFeeDebts(newDebtX, newDebtY);
+    }
+
+    /// @notice Collect pending fees for a single bin (updates debt, no transfers)
+    function _collectFeesForBin(
+        address account,
+        uint24 binId
+    ) internal returns (uint256 pendingX, uint256 pendingY) {
+        uint256 shares = _balances[account][binId];
+        if (shares == 0) return (0, 0);
+
+        BinState memory bin = _getBinState(binId);
+        if (bin.liquidityIndex == 0) return (0, 0);
+
+        LiquidityData storage liquidity = _liquidityData[bin.liquidityIndex];
+        (uint128 debtX, uint128 debtY) = _unpackFeeDebts(_feeDebts[account][binId]);
+
+        (pendingX, pendingY) = _calculatePendingFees(
+            shares, liquidity.feeGrowthX, liquidity.feeGrowthY, debtX, debtY
+        );
+
+        if (pendingX > 0 || pendingY > 0) {
+            _updateFeeDebt(account, binId, shares, liquidity.feeGrowthX, liquidity.feeGrowthY);
         }
     }
 
