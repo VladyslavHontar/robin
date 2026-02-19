@@ -337,7 +337,11 @@ library FeeHelper {
 
     /**
      * @notice Calculate accumulated fees per share for a bin
-     * @dev Used for auto-compounding fee distribution
+     * @dev Used for LP fee tracking (MasterChef accumulator pattern).
+     *      feeGrowth is stored as uint128 for storage efficiency. If accumulated
+     *      growth would exceed uint128.max the value is saturated — an extreme edge
+     *      case requiring ~3.4 × 10^38 fee-units per share which is economically
+     *      unreachable on any realistic pool.
      * @param currentFeeGrowth Current fee growth per share
      * @param feesCollected Fees collected this swap
      * @param totalShares Total shares in bin
@@ -350,12 +354,14 @@ library FeeHelper {
     ) internal pure returns (uint128 newFeeGrowth) {
         if (totalShares == 0) return currentFeeGrowth;
 
-        // feeGrowth += feesCollected / totalShares (scaled by 1e18)
+        // feeGrowth += feesCollected * 1e18 / totalShares
         uint256 feePerShare = (feesCollected * 1e18) / totalShares;
 
-        // Add to current growth (with overflow protection)
-        unchecked {
-            newFeeGrowth = currentFeeGrowth + uint128(feePerShare);
-        }
+        // Cap feePerShare to prevent silent truncation on uint128 cast
+        if (feePerShare > type(uint128).max) feePerShare = type(uint128).max;
+
+        // Safe addition: saturate at uint128 max instead of wrapping
+        uint256 newGrowth = uint256(currentFeeGrowth) + feePerShare;
+        newFeeGrowth = newGrowth > type(uint128).max ? type(uint128).max : uint128(newGrowth);
     }
 }

@@ -506,11 +506,12 @@ contract LBPair is ILBPair, Initializable {
         if (params.to == address(0)) revert LBPair__ZeroAddress();
 
         // Validate active bin is within slippage tolerance
-        uint24 activeIdDesired = params.activeIdDesired;
-        uint24 idSlippage = params.idSlippage;
-        if (
-            activeId < activeIdDesired - idSlippage || activeId > activeIdDesired + idSlippage
-        ) {
+        // Use uint256 to prevent underflow/overflow when computing bounds
+        uint256 activeIdDesired = params.activeIdDesired;
+        uint256 idSlippage = params.idSlippage;
+        uint256 minBinId = activeIdDesired > idSlippage ? activeIdDesired - idSlippage : 0;
+        uint256 maxBinId = activeIdDesired + idSlippage;
+        if (uint256(activeId) < minBinId || uint256(activeId) > maxBinId) {
             revert LBPair__InvalidActiveId(activeId);
         }
 
@@ -848,33 +849,35 @@ contract LBPair is ILBPair, Initializable {
             }
         }
 
-        // Collect pending fees if user has existing position in this bin
+        // Calculate pending fees for existing position (CEI: compute before state change,
+        // transfer AFTER all state updates to prevent reentrancy from reading stale values).
         uint256 existingShares = _balances[to][binId];
+        uint256 pendingFeesX;
+        uint256 pendingFeesY;
         if (existingShares > 0) {
             (uint128 debtX, uint128 debtY) = _unpackFeeDebts(_feeDebts[to][binId]);
-            (uint256 pendingFeesX, uint256 pendingFeesY) = _calculatePendingFees(
+            (pendingFeesX, pendingFeesY) = _calculatePendingFees(
                 existingShares, liquidity.feeGrowthX, liquidity.feeGrowthY, debtX, debtY
             );
-            if (pendingFeesX > 0) _transfer(tokenX, to, pendingFeesX);
-            if (pendingFeesY > 0) _transfer(tokenY, to, pendingFeesY);
-            if (pendingFeesX > 0 || pendingFeesY > 0) {
-                emit FeesCollected(to, to, pendingFeesX, pendingFeesY);
-            }
         }
 
-        // Update bin reserves
+        // Effects: update all state before any external calls (CEI pattern)
         bin.reserveX += uint112(amountX);
         bin.reserveY += uint112(amountY);
         _setBinState(binId, bin);
 
-        // Update liquidity data
         liquidity.totalShares += uint128(shares);
-
-        // Update user balance
         _balances[to][binId] += shares;
 
         // Snapshot fee debt at current feeGrowth for new total shares
         _updateFeeDebt(to, binId, _balances[to][binId], liquidity.feeGrowthX, liquidity.feeGrowthY);
+
+        // Interactions: transfer pending fees only after all state is finalized
+        if (pendingFeesX > 0) _transfer(tokenX, to, pendingFeesX);
+        if (pendingFeesY > 0) _transfer(tokenY, to, pendingFeesY);
+        if (pendingFeesX > 0 || pendingFeesY > 0) {
+            emit FeesCollected(to, to, pendingFeesX, pendingFeesY);
+        }
     }
 
     /**
@@ -898,32 +901,26 @@ contract LBPair is ILBPair, Initializable {
         BinState memory bin = _getBinState(binId);
         LiquidityData storage liquidity = _liquidityData[bin.liquidityIndex];
 
-        // Auto-collect pending fees before burning
+        // Checks: read pending fees before any state change (CEI — transfer happens last)
+        uint256 pendingFeesX;
+        uint256 pendingFeesY;
         {
             (uint128 debtX, uint128 debtY) = _unpackFeeDebts(_feeDebts[from][binId]);
             uint256 currentShares = _balances[from][binId];
-            (uint256 pendingFeesX, uint256 pendingFeesY) = _calculatePendingFees(
+            (pendingFeesX, pendingFeesY) = _calculatePendingFees(
                 currentShares, liquidity.feeGrowthX, liquidity.feeGrowthY, debtX, debtY
             );
-            if (pendingFeesX > 0) _transfer(tokenX, from, pendingFeesX);
-            if (pendingFeesY > 0) _transfer(tokenY, from, pendingFeesY);
-            if (pendingFeesX > 0 || pendingFeesY > 0) {
-                emit FeesCollected(from, from, pendingFeesX, pendingFeesY);
-            }
         }
 
-        // Calculate amounts proportional to shares
+        // Calculate principal amounts proportional to shares being removed
         amountX = (shares * uint256(bin.reserveX)) / liquidity.totalShares;
         amountY = (shares * uint256(bin.reserveY)) / liquidity.totalShares;
 
-        // Update bin reserves
+        // Effects: update all state before external calls (CEI pattern)
         bin.reserveX -= uint112(amountX);
         bin.reserveY -= uint112(amountY);
 
-        // Update liquidity data
         liquidity.totalShares -= uint128(shares);
-
-        // Update user balance
         _balances[from][binId] -= shares;
 
         // Update fee debt for remaining shares (or clear if fully exited)
@@ -941,6 +938,13 @@ contract LBPair is ILBPair, Initializable {
         }
 
         _setBinState(binId, bin);
+
+        // Interactions: transfer pending fees after all state is finalized
+        if (pendingFeesX > 0) _transfer(tokenX, from, pendingFeesX);
+        if (pendingFeesY > 0) _transfer(tokenY, from, pendingFeesY);
+        if (pendingFeesX > 0 || pendingFeesY > 0) {
+            emit FeesCollected(from, from, pendingFeesX, pendingFeesY);
+        }
     }
 
     /**
@@ -997,6 +1001,8 @@ contract LBPair is ILBPair, Initializable {
     }
 
     /// @notice Calculate pending unclaimed fees for a position
+    /// @dev Uses saturating subtraction so a precision rounding edge-case never
+    ///      causes a revert that permanently locks LP funds.
     function _calculatePendingFees(
         uint256 shares,
         uint128 feeGrowthX,
@@ -1005,8 +1011,10 @@ contract LBPair is ILBPair, Initializable {
         uint128 debtY
     ) internal pure returns (uint256 pendingX, uint256 pendingY) {
         if (shares == 0) return (0, 0);
-        pendingX = (shares * uint256(feeGrowthX)) / FEE_PRECISION - uint256(debtX);
-        pendingY = (shares * uint256(feeGrowthY)) / FEE_PRECISION - uint256(debtY);
+        uint256 earnedX = (shares * uint256(feeGrowthX)) / FEE_PRECISION;
+        uint256 earnedY = (shares * uint256(feeGrowthY)) / FEE_PRECISION;
+        pendingX = earnedX > uint256(debtX) ? earnedX - uint256(debtX) : 0;
+        pendingY = earnedY > uint256(debtY) ? earnedY - uint256(debtY) : 0;
     }
 
     /// @notice Update fee debt snapshot for a user after shares change

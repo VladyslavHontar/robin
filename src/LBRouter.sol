@@ -146,12 +146,18 @@ contract LBRouter is Initializable {
         _checkDeadline(deadline);
         if (pair == address(0)) revert LBRouter__PairNotFound();
 
-        // Validate the pair has the expected tokens (prevents use with arbitrary contracts)
+        // Validate the pair has the expected tokens
         address pairTokenX = ILBPair(pair).tokenX();
         address pairTokenY = ILBPair(pair).tokenY();
         bool validTokens = (tokenIn == pairTokenX && tokenOut == pairTokenY)
                         || (tokenIn == pairTokenY && tokenOut == pairTokenX);
         if (!validTokens) revert LBRouter__InvalidPath();
+
+        // Verify pair is registered in factory (prevents malicious pair contracts that
+        // return correct token addresses from tokenX()/tokenY() but behave maliciously)
+        uint16 pairBinStep = ILBPair(pair).binStep();
+        address registeredPair = factory.getPair(pairTokenX, pairTokenY, pairBinStep);
+        if (registeredPair != pair) revert LBRouter__PairNotFound();
 
         // Transfer tokens from user to router
         _safeTransferFrom(tokenIn, msg.sender, address(this), amountIn);
