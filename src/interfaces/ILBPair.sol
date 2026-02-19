@@ -138,6 +138,11 @@ interface ILBPair is ILBPairTypes, ILBPairErrors, ILBPairEvents {
         address account
     ) external returns (uint256 amountX, uint256 amountY);
 
+    function getUnclaimedFees(
+        address account,
+        uint24[] calldata binIds
+    ) external view returns (uint256 amountX, uint256 amountY);
+
     // =============================================================
     //                      ADMIN FUNCTIONS
     // =============================================================
