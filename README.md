@@ -2,7 +2,7 @@
 
 Compliance-enabled Dynamic Liquidity Market Maker for tokenized securities on [Robinhood Chain](https://explorer.testnet.chain.robinhood.com).
 
-Built on the discrete liquidity bin model (inspired by [Trader Joe Liquidity Book](https://github.com/traderjoe-xyz/joe-v2) and [Meteora DLMM](https://docs.meteora.ag/dlmm-concepts)) with an integrated ERC-3643 identity layer for on-chain KYC enforcement.
+Built on the discrete liquidity bin model (inspired by [Trader Joe Liquidity Book](https://github.com/traderjoe-xyz/joe-v2) and [Meteora DLMM](https://docs.meteora.ag/developer-guide/guides/dlmm/overview)) with an integrated ERC-3643 identity layer for on-chain KYC enforcement.
 
 ## Overview
 
