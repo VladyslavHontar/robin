@@ -1,0 +1,203 @@
+@startuml Robin_DLMM_DDD_Architecture
+
+'=====================================================
+' Robin DLMM — Domain-Driven Design · Clean Architecture
+'=====================================================
+
+!theme plain
+skinparam linetype ortho
+skinparam defaultFontSize 11
+skinparam defaultFontName Arial
+skinparam roundCorner 8
+skinparam shadowing false
+skinparam nodesep 55
+skinparam ranksep 50
+skinparam backgroundColor #FEFEFE
+
+skinparam package {
+    BackgroundColor #FFFFFF
+    BorderColor #888888
+    FontSize 13
+    FontStyle bold
+}
+skinparam rectangle {
+    FontSize 10
+}
+skinparam arrow {
+    Color #555555
+    Thickness 1
+    FontSize 9
+    FontColor #444444
+}
+skinparam note {
+    BorderColor #AAAAAA
+    BackgroundColor #FFFFF8
+    FontSize 10
+}
+
+' =============================================================
+'  ACTORS
+' =============================================================
+actor "Trader / LP" as user  #B3E5FC
+actor "Owner / Agent" as admin #FFCCBC
+
+' =============================================================
+'  BOUNDED CONTEXT 1: DLMM TRADING
+' =============================================================
+package "Bounded Context: DLMM Trading" as BC_TRADING #F0F8FF {
+
+    ' ── APPLICATION LAYER ──────────────────────────────────
+    package "Application Layer" as APP #E3F2FD {
+
+        rectangle "LBRouter\n<<application service>>\n---\nOrchestrates use cases.\nNo business logic of its own —\ndelegates to domain via ports.\n---\nswapExactTokensForTokens()\nswapOnPair()\naddLiquidityUniform()\naddLiquiditySpot()\nremoveLiquidity()\ngetSwapQuote()\ngetActiveBinFromOracle()\ngetOracleDeviation()\ncalculateOptimalBinRange()\ngenerateNormalDistribution()" as router #BBDEFB
+    }
+
+    ' ── INFRASTRUCTURE LAYER ───────────────────────────────
+    package "Infrastructure Layer" as INFRA #FFF3E0 {
+
+        rectangle "LBFactory\n<<repository + factory>>\n---\nCreates LBPair aggregates as BeaconProxy.\nTracks every pair. Admin entrypoint.\n---\ncreatePair()\ngetPair() / getAllPairs()\ncomputePairAddress()  [CREATE2]\nupgradePairImplementation()\nsetFeeParameters()\nsetOracleModule() / setPairOracle()\ncollectProtocolFees()\nsetProtocolFeeRecipient()" as factory #FFE0B2
+
+        rectangle "UpgradeableBeacon\n<<infrastructure>>\n---\nHolds current LBPair implementation.\nAll BeaconProxy instances delegate here.\nFactory upgrades every pair atomically\nvia upgradePairImplementation()." as beacon #FFCCBC
+
+        rectangle "OracleModule\n<<infrastructure adapter>>\nimplements IOracleModule <<port>>\n---\nAdapts Chainlink data feeds to the\ndomain-owned IOracleModule port.\nDomain imports only the port — never this.\n---\ngetOracleBinId()\ngetDeviationFee()\ngetOraclePrice()\ngetDeviationParams()\ngetDefaultDeviationParams()\nsetPriceFeed()\nsetDeviationParams()" as oracle #FFE082
+
+        rectangle "Chainlink\n<<external service>>\n---\nlatestRoundData()\ndecimals()\nStock / RWA price feeds" as chainlink #FFF9C4
+    }
+
+    ' ── DOMAIN LAYER ───────────────────────────────────────
+    package "Domain Layer" as DOMAIN #E8F5E9 {
+
+        package "Aggregate" as AGG #C8E6C9 {
+            rectangle "LBPair\n<<aggregate root>>\n---\nEnforces all trading invariants.\n3-level bitmap index for O(1) bin lookup.\nMasterChef-style fee-growth accumulators.\nDeployed as BeaconProxy (infra concern).\n---\nswap()    mint()    burn()\ncollectFees()    collectProtocolFees()\nbalanceOf()    getTotalShares()\ngetBinReserves()    getSwapOut()\ngetNextNonEmptyBin()\ngetUnclaimedFees()\ngetFeeParameters()\nsetFeeParameters()    setOracle()" as pair #A5D6A7
+        }
+
+        package "Ports  (domain-owned interfaces)" as PORTS #DCEDC8 {
+            rectangle "IOracleModule\n<<port>>\n---\nThe domain's outward declaration\nof what it needs from an oracle.\nOracleModule (infra) satisfies it.\n---\ngetOracleBinId()\ngetDeviationFee()\ngetOraclePrice()" as iOracle #F1F8E9
+
+            rectangle "ILBPair  ·  ILBFactory\n<<port>>\n---\nDomain defines the contracts it\nexposes and what it expects.\nNo concrete class imported by domain." as iPairFact #F1F8E9
+        }
+
+        package "Domain Services  (pure — zero external deps)" as DS #F9FBE7 {
+
+            rectangle "BinMath\n<<domain service>>\n---\ngetPriceFromId()\ngetIdFromPrice()\ngetBasePriceOfBin()\ngetUpperPriceOfBin()\nisPriceInBin()\nfromHumanPrice() / toHumanPrice()" as binMath #F0F4C3
+
+            rectangle "SwapHelper\n<<domain service>>\n---\ngetAmountOutSingleBin()\ngetAmountOutMultiBin()\ngetAmountIn()\nupdateBinReserves()\ncalculatePriceImpact()\nisBinDepleted()" as swapHelper #F0F4C3
+
+            rectangle "BitMath\n<<domain service>>\n---\nclosestBitLeft()\nclosestBitRight()\nsetBit() / clearBit()\nmostSignificantBit()\nleastSignificantBit()\npopCount()" as bitMath #F0F4C3
+
+            rectangle "FeeHelper\n<<domain service>>\n---\ngetTotalFee()\ngetVolatilityFee()\ngetOracleDeviationFee()\napplyTimeAdjustment()  [1.5× off-hours]\naccumulateFees()  splitFee()\nupdateVolatilityReference()\ngetDefaultStockFeeParameters()" as feeHelper #F0F4C3
+        }
+
+        package "Shared Kernel" as SK #ECEFF1 {
+
+            rectangle "Value Objects\n<<value object>>\n---\nBinState  ·  LiquidityData\nFeeParameters  ·  SwapResult\nSwapParameters  ·  LiquidityParameters\nRemoveLiquidityParameters\nOracleDeviationParams" as vo #CFD8DC
+
+            rectangle "Domain Events\n<<domain event>>\nEmitted by LBPair aggregate.\n---\nSwap\nLiquidityAdded  /  LiquidityRemoved\nFeesCollected\nActiveBinChanged\nBinInitialized  /  BinEmptied\nProtocolFeesCollected\nFeeParametersSet" as domevents #CFD8DC
+
+            rectangle "Domain Errors\n<<domain error>>\n---\n24 custom errors\n(LBPair__*  LBFactory__*\nSwapHelper__*  FeeHelper__*\nOracleModule__*)" as errors #CFD8DC
+        }
+    }
+}
+
+' =============================================================
+'  ANTI-CORRUPTION LAYER
+' =============================================================
+note as ACL
+  <b><<Anti-Corruption Layer>></b>
+  LBPair calls ERC-20 <i>transferFrom()</i>.
+  Compliance is enforced <i>inside</i> RWAToken.
+  The DLMM Trading BC is fully oblivious
+  to the Compliance domain model.
+end note
+
+' =============================================================
+'  BOUNDED CONTEXT 2: IDENTITY & COMPLIANCE  (ERC-3643 / T-REX)
+' =============================================================
+package "Bounded Context: Identity & Compliance  (ERC-3643 / T-REX)" as BC_COMPLIANCE #FFF8E1 {
+
+    rectangle "RWAToken  (ERC-3643 ⊇ ERC-20)\n<<aggregate root>>\n---\nPresents as plain ERC-20 externally.\nEnforces compliance in _update() hook.\nEOA senders checked; contract callers\n(DEX pairs) bypass — they are whitelisted.\n---\ntransfer() / transferFrom()\nfreeze() / forcedTransfer()\nsetComplianceModule()" as token #FFCA28
+
+    rectangle "ComplianceModule\n<<domain service>>\n---\ncompliesWithTransfer()\nsetWhitelisted()\nsetCountryAllowed()\nsetTransferLimits()" as compliance #FFF176
+
+    rectangle "IdentityRegistry\n<<repository>>\n---\nisVerified()\nregisterIdentity() / deleteIdentity()\ninvestorCountry()" as registry #FFF176
+
+    rectangle "Identity  (OnchainID)\n<<entity>>\n---\naddClaim() / getClaim()\ngetClaimIdsByTopic()" as identity #FFF176
+
+    rectangle "ClaimIssuer\n<<trust anchor>>\n---\nCryptographic validator.\nisClaimValid()\nrevokeClaim()" as issuer #FFF176
+}
+
+' =============================================================
+'  CONNECTIONS — Actors
+' =============================================================
+user  -down-> router  : use cases
+admin -down-> factory : admin ops
+
+' =============================================================
+'  CONNECTIONS — Application → Infrastructure + Domain
+' =============================================================
+router -down->  pair    : via ILBPair <<port>>
+router -right-> factory : reads pair addresses
+
+' =============================================================
+'  CONNECTIONS — Infrastructure → Domain
+'  Infrastructure adapts to / creates domain objects.
+'  Arrows point inward (toward domain). ✓
+' =============================================================
+factory -down->  pair   : creates  (BeaconProxy)
+factory -down->  beacon : owns / upgrades impl
+oracle  ..|>     iOracle : implements <<port>>
+oracle  -down->  chainlink : latestRoundData()
+oracle  -down->  binMath : getIdFromPrice()
+
+' =============================================================
+'  CONNECTIONS — Domain internal
+'  Aggregate → ports, domain services, shared kernel.
+'  All arrows stay inside the domain layer. ✓
+' =============================================================
+pair -down-> iOracle    : depends on port,\nnot concrete adapter
+pair -down-> binMath
+pair -down-> swapHelper
+pair -down-> bitMath
+pair -down-> feeHelper
+pair -down-> vo         : uses value objects
+pair -down-> domevents  : emits
+
+' =============================================================
+'  CONNECTIONS — Cross-Bounded-Context  (via ACL)
+' =============================================================
+pair -right-> token : transferFrom()\nERC-20 interface  [ACL seam]
+
+' =============================================================
+'  CONNECTIONS — Compliance BC internal
+' =============================================================
+token      -down-> compliance : compliesWithTransfer()\non every EOA transfer
+compliance -down-> registry   : isVerified()
+registry   -down-> identity   : getClaim()
+identity   -down-> issuer     : isClaimValid()
+
+' =============================================================
+'  LAYOUT HINTS
+' =============================================================
+
+' Actors row
+user -[hidden]right- admin
+
+' Application / Infrastructure row
+router  -[hidden]right- factory
+factory -[hidden]right- beacon
+beacon  -[hidden]right- oracle
+oracle  -[hidden]right- chainlink
+
+' Ports row
+iOracle -[hidden]right- iPairFact
+
+' Domain services row
+binMath    -[hidden]right- swapHelper
+swapHelper -[hidden]right- bitMath
+bitMath    -[hidden]right- feeHelper
+
+' Shared kernel row
+vo -[hidden]right- domevents
+domevents  -[hidden]right- errors
+
+@enduml

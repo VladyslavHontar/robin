@@ -1,0 +1,40 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+test = "test"
+cache_path = "cache"
+solc_version = "0.8.28"
+optimizer = true
+optimizer_runs = 200
+via_ir = true
+gas_reports = ["*"]
+
+# Robinhood Chain Testnet Configuration
+[rpc_endpoints]
+robinhood_testnet = "https://rpc.testnet.chain.robinhood.com"
+
+# Chain configuration
+[chains]
+robinhood_testnet = { chain_id = 46630 }
+
+# Etherscan configuration for verification
+[etherscan]
+robinhood_testnet = { key = "${ETHERSCAN_API_KEY}", url = "https://explorer.testnet.chain.robinhood.com/api" }
+
+# Formatter
+[profile.default.fmt]
+line_length = 100
+tab_width = 4
+bracket_spacing = true
+int_types = "long"
+
+# Test configuration
+[profile.default.fuzz]
+runs = 256
+
+[profile.default.invariant]
+runs = 256
+depth = 15
+
+# See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
