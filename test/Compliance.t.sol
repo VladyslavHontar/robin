@@ -92,6 +92,11 @@ contract ComplianceTest is Test {
 
         // Deploy tokens
         amzn = new RWAToken("Amazon Stock Token", "AMZN", 18, owner);
+
+        // Pre-fund unverified charlie before compliance is attached: mint is now KYC-gated,
+        // so issuance to a non-verified holder must happen before the module is set.
+        amzn.mint(charlie, 1_000_000e18);
+
         amzn.setComplianceModule(address(complianceModule));
 
         // Authorize AMZN token to call recordTransfer on ComplianceModule
@@ -117,7 +122,6 @@ contract ComplianceTest is Test {
         // Mint to all actors
         amzn.mint(alice, 1_000_000e18);
         amzn.mint(bob, 1_000_000e18);
-        amzn.mint(charlie, 1_000_000e18);
 
         weth.mint(alice, 1_000_000e18);
         weth.mint(bob, 1_000_000e18);
@@ -310,10 +314,17 @@ contract ComplianceTest is Test {
         assertEq(amzn.balanceOf(owner), ownerBalance + charlieBalance);
     }
 
-    function testMintBypassesCompliance() public {
-        amzn.freeze(charlie);
+    function testMintRequiresCompliantRecipient() public {
+        // Minting to an unverified recipient is now rejected (ERC-3643 recipient gating).
+        vm.expectRevert(
+            abi.encodeWithSignature("RWAToken__NotCompliant(address,address)", address(0), charlie)
+        );
         amzn.mint(charlie, 500e18);
-        assertEq(amzn.balanceOf(charlie), 1_000_000e18 + 500e18);
+
+        // Minting to a verified holder still works.
+        uint256 beforeBal = amzn.balanceOf(alice);
+        amzn.mint(alice, 500e18);
+        assertEq(amzn.balanceOf(alice), beforeBal + 500e18);
     }
 
     function testRemoveComplianceModuleMakesTokenPermissionless() public {
@@ -392,6 +403,27 @@ contract ComplianceTest is Test {
         assertFalse(complianceModule.canTransfer(address(amzn), alice, bob, 15_000e18));
     }
 
+    function testRecipientTransferLimitEnforced() public {
+        complianceModule.setTransferLimits(address(amzn), 10_000e18, 1_000_000e18);
+
+        // Seed bob's RECEIVED volume up to the daily cap (as the authorized token would on transfers).
+        vm.prank(address(amzn));
+        complianceModule.recordTransfer(address(amzn), charlie, bob, 10_000e18);
+
+        // Sender alice still has full headroom, but recipient bob is at the daily cap:
+        // the transfer must be rejected on the recipient side (#6).
+        assertFalse(
+            complianceModule.canTransfer(address(amzn), alice, bob, 1e18),
+            "recipient at daily cap must block the buy"
+        );
+
+        // A recipient with headroom (alice, counter still 0) passes, while capped bob is blocked.
+        assertTrue(
+            complianceModule.canTransfer(address(amzn), alice, alice, 1e18),
+            "recipient with headroom should pass"
+        );
+    }
+
     function testWhitelistedAddressBypassesCompliance() public {
         complianceModule.setWhitelisted(charlie, true);
         assertTrue(complianceModule.isVerified(charlie));
@@ -401,7 +433,7 @@ contract ComplianceTest is Test {
         // Unauthorized caller cannot record transfers
         vm.prank(charlie);
         vm.expectRevert(ComplianceModule.ComplianceModule__Unauthorized.selector);
-        complianceModule.recordTransfer(address(amzn), alice, 100e18);
+        complianceModule.recordTransfer(address(amzn), alice, bob, 100e18);
     }
 
     function testBatchArrayLengthMismatch() public {

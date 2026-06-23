@@ -113,4 +113,6 @@ interface ILBPairEvents {
     event OracleSet(address indexed oracle);
 
     event PausedStateChanged(bool paused);
+
+    event MaxOracleDeviationBinsSet(uint24 maxDeviationBins);
 }

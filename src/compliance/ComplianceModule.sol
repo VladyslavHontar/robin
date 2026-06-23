@@ -101,6 +101,28 @@ contract ComplianceModule is IComplianceModule {
             }
         }
 
+        // Recipient-side limits: enforce per-investor caps on the buyer/receiver for real
+        // transfers (from != 0). Mints (from == 0) are issuance and exempt from limits.
+        if (!toWhitelisted && from != address(0) && amount > 0) {
+            TransferLimit storage limits = _transferLimits[token];
+
+            if (limits.dailyLimit > 0) {
+                uint256 today = block.timestamp / 1 days;
+                uint256 dailyUsed = _dailyTransfers[token][to][today];
+                if (dailyUsed + amount > limits.dailyLimit) {
+                    return false;
+                }
+            }
+
+            if (limits.monthlyLimit > 0) {
+                uint256 thisMonth = block.timestamp / 30 days;
+                uint256 monthlyUsed = _monthlyTransfers[token][to][thisMonth];
+                if (monthlyUsed + amount > limits.monthlyLimit) {
+                    return false;
+                }
+            }
+        }
+
         return true;
     }
 
@@ -135,16 +157,22 @@ contract ComplianceModule is IComplianceModule {
         }
     }
 
-    function recordTransfer(address token, address from, uint256 amount) external {
+    function recordTransfer(address token, address from, address to, uint256 amount) external {
         if (!authorizedTokens[msg.sender]) revert ComplianceModule__Unauthorized();
-
-        if (whitelisted[from] || from == address(0)) return;
 
         uint256 today = block.timestamp / 1 days;
         uint256 thisMonth = block.timestamp / 30 days;
 
-        _dailyTransfers[token][from][today] += amount;
-        _monthlyTransfers[token][from][thisMonth] += amount;
+        // Track sent volume for the sender and received volume for the recipient so that
+        // both directions count against per-investor limits (whitelisted/zero are exempt).
+        if (from != address(0) && !whitelisted[from]) {
+            _dailyTransfers[token][from][today] += amount;
+            _monthlyTransfers[token][from][thisMonth] += amount;
+        }
+        if (to != address(0) && !whitelisted[to]) {
+            _dailyTransfers[token][to][today] += amount;
+            _monthlyTransfers[token][to][thisMonth] += amount;
+        }
     }
 
     function setCountryAllowed(

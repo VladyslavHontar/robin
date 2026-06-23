@@ -72,10 +72,11 @@ interface IComplianceModule {
         returns (uint256 dailyRemaining, uint256 monthlyRemaining);
 
     /**
-     * @notice Record a completed transfer for limit tracking
+     * @notice Record a completed transfer for limit tracking (both sender and recipient)
      * @param token The token address
      * @param from The sender address
+     * @param to The recipient address
      * @param amount The transfer amount
      */
-    function recordTransfer(address token, address from, uint256 amount) external;
+    function recordTransfer(address token, address from, address to, uint256 amount) external;
 }

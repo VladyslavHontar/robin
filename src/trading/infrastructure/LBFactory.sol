@@ -187,6 +187,15 @@ contract LBFactory is ILBFactory, Initializable {
         LBPair(pair).setOracle(_oracleModule);
     }
 
+    /// @notice Configure the oracle deviation circuit breaker (in bins) for a pair. 0 disables it.
+    function setPairMaxOracleDeviationBins(
+        address pair,
+        uint24 maxDeviationBins
+    ) external onlyOwner {
+        if (pair == address(0)) revert LBFactory__ZeroAddress();
+        LBPair(pair).setMaxOracleDeviationBins(maxDeviationBins);
+    }
+
     function upgradePairImplementation(address newImplementation) external onlyOwner {
         if (newImplementation == address(0)) revert LBFactory__ZeroAddress();
         beacon.upgradeTo(newImplementation);

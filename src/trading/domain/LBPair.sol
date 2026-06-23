@@ -17,7 +17,9 @@ contract LBPair is ILBPair, Initializable {
 
     uint256 private constant MAX_BINS_PER_OPERATION = 50;
 
-    uint24 private constant MAX_PRICE_MOVE_BINS = 100;
+    // Circuit breaker: a single swap may move the active bin by at most this many bins.
+    // Must stay strictly below SwapHelper.MAX_BINS_PER_SWAP (the loop cap) so the check is live.
+    uint24 private constant MAX_PRICE_MOVE_BINS = 50;
 
     uint256 private constant FEE_PRECISION = 1e18;
 
@@ -66,7 +68,11 @@ contract LBPair is ILBPair, Initializable {
 
     mapping(address => mapping(uint24 => uint256)) private _feeDebts;
 
-    uint256[47] private __gap;
+    /// @notice Hard-halt threshold: max bins the post-swap price may deviate from the oracle.
+    ///         0 disables the check. Configured by the factory.
+    uint24 public maxOracleDeviationBins;
+
+    uint256[46] private __gap;
 
     modifier nonReentrant() {
         if (_status == ENTERED) revert LBPair__Reentrancy();
@@ -121,6 +127,9 @@ contract LBPair is ILBPair, Initializable {
         feeParameters.volatilityReference = _activeId;
 
         _nextLiquidityIndex = 1;
+
+        // Default oracle deviation circuit breaker (bins). Operator can retune via the factory.
+        maxOracleDeviationBins = 50;
     }
 
     function getBinReserves(
@@ -380,6 +389,21 @@ contract LBPair is ILBPair, Initializable {
             revert LBPair__ExcessivePriceMove(startBinId, currentBinId, MAX_PRICE_MOVE_BINS);
         }
 
+        // Hard-halt: refuse swaps that push the DEX price too far from the oracle (manipulation /
+        // stale-pool protection for RWAs). Disabled when oracle unset or threshold is 0.
+        if (oracle != address(0) && maxOracleDeviationBins > 0) {
+            try IOracleModule(oracle).getOracleBinId(address(this)) returns (uint24 oracleBinId, bool isValid) {
+                if (isValid) {
+                    uint24 deviation = currentBinId > oracleBinId
+                        ? currentBinId - oracleBinId
+                        : oracleBinId - currentBinId;
+                    if (deviation > maxOracleDeviationBins) {
+                        revert LBPair__OracleDeviationTooHigh(currentBinId, oracleBinId, maxOracleDeviationBins);
+                    }
+                }
+            } catch {}
+        }
+
         if (currentBinId != activeId) {
             emit ActiveBinChanged(activeId, currentBinId);
             activeId = currentBinId;
@@ -563,6 +587,12 @@ contract LBPair is ILBPair, Initializable {
     function setOracle(address _oracle) external onlyFactory {
         oracle = _oracle;
         emit OracleSet(_oracle);
+    }
+
+    /// @notice Set the oracle deviation circuit breaker (in bins). 0 disables the check.
+    function setMaxOracleDeviationBins(uint24 _maxDeviationBins) external onlyFactory {
+        maxOracleDeviationBins = _maxDeviationBins;
+        emit MaxOracleDeviationBinsSet(_maxDeviationBins);
     }
 
     function setPaused(bool _paused) external onlyFactory {

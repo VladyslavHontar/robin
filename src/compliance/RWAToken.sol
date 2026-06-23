@@ -134,11 +134,15 @@ contract RWAToken {
     }
 
     function _update(address from, address to, uint256 amount) internal {
+        bool isMint = from == address(0) && to != address(0);
         bool isTransfer = from != address(0) && to != address(0);
 
-        if (isTransfer) {
-            if (frozen[from]) revert RWAToken__AccountFrozen(from);
+        // Recipient-side compliance applies to transfers AND mints: per ERC-3643 newly issued
+        // securities must land on a verified, compliant, non-frozen holder. Burns (to == 0) and
+        // owner forcedTransfer (which bypasses _update) are intentionally exempt.
+        if (isTransfer || isMint) {
             if (frozen[to]) revert RWAToken__AccountFrozen(to);
+            if (isTransfer && frozen[from]) revert RWAToken__AccountFrozen(from);
 
             if (complianceModule != address(0)) {
                 if (!IComplianceModule(complianceModule).canTransfer(address(this), from, to, amount)) {
@@ -164,7 +168,7 @@ contract RWAToken {
         emit Transfer(from, to, amount);
 
         if (isTransfer && complianceModule != address(0)) {
-            IComplianceModule(complianceModule).recordTransfer(address(this), from, amount);
+            IComplianceModule(complianceModule).recordTransfer(address(this), from, to, amount);
         }
     }
 

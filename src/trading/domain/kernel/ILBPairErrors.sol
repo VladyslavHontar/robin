@@ -65,4 +65,10 @@ interface ILBPairErrors {
 
     /// @notice Thrown when the first deposit to a bin mints less than the locked minimum liquidity
     error LBPair__InsufficientLiquidityMinted();
+
+    /// @notice Thrown when the post-swap price deviates from the oracle beyond the allowed bins
+    /// @param dexBinId Resulting DEX active bin
+    /// @param oracleBinId Oracle-implied bin
+    /// @param maxDeviationBins Maximum allowed deviation in bins
+    error LBPair__OracleDeviationTooHigh(uint24 dexBinId, uint24 oracleBinId, uint24 maxDeviationBins);
 }
