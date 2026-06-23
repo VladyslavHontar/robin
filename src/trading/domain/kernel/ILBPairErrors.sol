@@ -62,4 +62,7 @@ interface ILBPairErrors {
     /// @param binsCount Number of bins
     /// @param maxBins Maximum allowed bins
     error LBPair__TooManyBins(uint256 binsCount, uint256 maxBins);
+
+    /// @notice Thrown when the first deposit to a bin mints less than the locked minimum liquidity
+    error LBPair__InsufficientLiquidityMinted();
 }

@@ -21,6 +21,13 @@ contract LBPair is ILBPair, Initializable {
 
     uint256 private constant FEE_PRECISION = 1e18;
 
+    /// @dev Shares permanently locked on the first deposit to each bin to defuse
+    ///      first-depositor share-inflation / donation attacks.
+    uint256 private constant MINIMUM_LIQUIDITY = 1000;
+
+    /// @dev Burn address that holds the locked minimum-liquidity shares (unrecoverable).
+    address private constant DEAD_ADDRESS = address(0xdEaD);
+
     uint256 private constant NOT_ENTERED = 1;
     uint256 private constant ENTERED = 2;
 
@@ -175,16 +182,41 @@ contract LBPair is ILBPair, Initializable {
 
             uint256 feeBps = FeeHelper.getTotalFee(feeParameters, startBinId, currentBinId, oracleDeviationFeeBps);
 
-            uint256 maxTotalInput = (reserveOut * FeeHelper.BASIS_POINT_MAX) / (FeeHelper.BASIS_POINT_MAX - feeBps);
+            uint256 price = BinMath.getPriceFromId(currentBinId, binStep);
+
+            uint256 maxEffectiveInput = swapForY
+                ? BinMath._mulDivDown(reserveOut, BinMath.SCALE, price)
+                : BinMath._mulDivDown(reserveOut, price, BinMath.SCALE);
+
+            if (maxEffectiveInput == 0) {
+                uint24 nextBin = _getNextNonEmptyBin(currentBinId, swapForY);
+                if (nextBin == currentBinId) break;
+                binsCrossed++;
+                currentBinId = nextBin;
+                continue;
+            }
+
+            uint256 maxTotalInput =
+                (maxEffectiveInput * FeeHelper.BASIS_POINT_MAX) / (FeeHelper.BASIS_POINT_MAX - feeBps);
             uint256 totalConsumed = amountInRemaining < maxTotalInput ? amountInRemaining : maxTotalInput;
 
             (uint256 binFee, uint256 effectiveInput) = FeeHelper.calculateFee(totalConsumed, feeBps);
 
-            amountOut += effectiveInput;
+            uint256 binAmountOut;
+            if (totalConsumed >= maxTotalInput) {
+                binAmountOut = reserveOut;
+            } else {
+                binAmountOut = swapForY
+                    ? BinMath._mulDivDown(effectiveInput, price, BinMath.SCALE)
+                    : BinMath._mulDivDown(effectiveInput, BinMath.SCALE, price);
+                if (binAmountOut > reserveOut) binAmountOut = reserveOut;
+            }
+
+            amountOut += binAmountOut;
             fees += binFee;
             amountInRemaining -= totalConsumed;
 
-            if (effectiveInput >= reserveOut) {
+            if (binAmountOut >= reserveOut) {
                 binsCrossed++;
                 uint24 nextBin = _getNextNonEmptyBin(currentBinId, swapForY);
                 if (nextBin == currentBinId) break;
@@ -256,12 +288,41 @@ contract LBPair is ILBPair, Initializable {
 
             uint256 feeBps = FeeHelper.getTotalFee(feeParameters, startBinId, currentBinId, oracleDeviationFeeBps);
 
-            uint256 maxTotalInput = (reserveOut * FeeHelper.BASIS_POINT_MAX) / (FeeHelper.BASIS_POINT_MAX - feeBps);
+            // Price of the current bin, scaled by BinMath.SCALE (units of Y per 1 unit of X).
+            uint256 price = BinMath.getPriceFromId(currentBinId, binStep);
+
+            // Effective (post-fee) input that exactly drains `reserveOut` of the output token,
+            // converted through the bin price.
+            uint256 maxEffectiveInput = params.swapForY
+                ? BinMath._mulDivDown(reserveOut, BinMath.SCALE, price)
+                : BinMath._mulDivDown(reserveOut, price, BinMath.SCALE);
+
+            // Output reserve is sub-unit relative to the input token at this price; skip the bin
+            // instead of giving it away for zero input.
+            if (maxEffectiveInput == 0) {
+                uint24 nextBin = _getNextNonEmptyBin(currentBinId, params.swapForY);
+                if (nextBin == currentBinId) break;
+                binsCrossed++;
+                currentBinId = nextBin;
+                continue;
+            }
+
+            uint256 maxTotalInput =
+                (maxEffectiveInput * FeeHelper.BASIS_POINT_MAX) / (FeeHelper.BASIS_POINT_MAX - feeBps);
             uint256 totalConsumed = amountInRemaining < maxTotalInput ? amountInRemaining : maxTotalInput;
 
             (uint256 binFee, uint256 effectiveInput) = FeeHelper.calculateFee(totalConsumed, feeBps);
 
-            uint256 binAmountOut = effectiveInput;
+            uint256 binAmountOut;
+            if (totalConsumed >= maxTotalInput) {
+                // Enough input to fully drain this bin; pin output to the reserve to avoid dust.
+                binAmountOut = reserveOut;
+            } else {
+                binAmountOut = params.swapForY
+                    ? BinMath._mulDivDown(effectiveInput, price, BinMath.SCALE)
+                    : BinMath._mulDivDown(effectiveInput, BinMath.SCALE, price);
+                if (binAmountOut > reserveOut) binAmountOut = reserveOut;
+            }
 
             (uint256 lpFee, uint256 protocolFee) = FeeHelper.splitFee(binFee, feeParameters.protocolShare);
 
@@ -631,11 +692,20 @@ contract LBPair is ILBPair, Initializable {
         LiquidityData storage liquidity = _liquidityData[bin.liquidityIndex];
 
         if (liquidity.totalShares == 0) {
-            if (amountX > 0 && amountY > 0) {
-                shares = _sqrt(amountX * amountY);
-            } else {
-                shares = amountX > 0 ? amountX : amountY;
+            uint256 initialShares = (amountX > 0 && amountY > 0)
+                ? _sqrt(amountX * amountY)
+                : (amountX > 0 ? amountX : amountY);
+
+            // Permanently lock MINIMUM_LIQUIDITY shares to the burn address on the first deposit
+            // so totalShares can never be driven to a tiny value, defusing share-inflation /
+            // donation attacks against later depositors.
+            if (initialShares <= MINIMUM_LIQUIDITY) {
+                revert LBPair__InsufficientLiquidityMinted();
             }
+            liquidity.totalShares += SafeCast.toUint128(MINIMUM_LIQUIDITY);
+            _balances[DEAD_ADDRESS][binId] += MINIMUM_LIQUIDITY;
+
+            shares = initialShares - MINIMUM_LIQUIDITY;
         } else {
             if (bin.reserveX > 0 && amountX > 0) {
                 uint256 shareX = (amountX * liquidity.totalShares) / uint256(bin.reserveX);
